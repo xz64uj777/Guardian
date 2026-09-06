@@ -1,8 +1,6 @@
 name: Bootstrap Gradle Wrapper
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
@@ -10,7 +8,6 @@ permissions:
 
 jobs:
   wrapper:
-    if: ${{ github.actor != 'github-actions[bot]' }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -37,7 +34,7 @@ jobs:
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add gradlew gradlew.bat gradle/wrapper/gradle-wrapper.jar gradle/wrapper/gradle-wrapper.properties
-            git commit -m "Bootstrap Gradle 8.11.1 wrapper"
+            git commit -m "Refresh Gradle 8.11.1 wrapper"
             git push
           else
             echo "Wrapper already current."
