@@ -14,10 +14,29 @@ import com.guardianlayer.app.R
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
 import java.io.FileInputStream
+import java.util.ArrayDeque
+import java.util.concurrent.atomic.AtomicLong
 
 class GuardianVpnService : VpnService() {
 
     enum class Mode { OFF, FIREWALL, LOCKDOWN }
+
+    data class TrafficDrop(
+        val timestamp: Long,
+        val protocol: String,
+        val destination: String,
+        val port: Int?
+    )
+
+    data class TrafficSnapshot(
+        val packets: Long,
+        val bytes: Long,
+        val tcpPackets: Long,
+        val udpPackets: Long,
+        val otherPackets: Long,
+        val lastActivityAt: Long,
+        val recent: List<TrafficDrop>
+    )
 
     companion object {
         const val ACTION_LOCKDOWN = "com.guardianlayer.app.action.LOCKDOWN"
@@ -25,12 +44,83 @@ class GuardianVpnService : VpnService() {
         const val ACTION_STOP = "com.guardianlayer.app.action.STOP_VPN"
         private const val CHANNEL_ID = "guardian_lockdown"
         private const val NOTIFICATION_ID = 7701
+        private const val MAX_RECENT_DROPS = 12
 
         @Volatile
         private var mode = Mode.OFF
 
+        private val droppedPackets = AtomicLong(0)
+        private val droppedBytes = AtomicLong(0)
+        private val tcpPackets = AtomicLong(0)
+        private val udpPackets = AtomicLong(0)
+        private val otherPackets = AtomicLong(0)
+        private val lastActivityAt = AtomicLong(0)
+        private val trafficLock = Any()
+        private val recentDrops = ArrayDeque<TrafficDrop>()
+
         fun isRunning(): Boolean = mode != Mode.OFF
         fun currentMode(): Mode = mode
+
+        fun trafficSnapshot(): TrafficSnapshot {
+            val recent = synchronized(trafficLock) {
+                recentDrops.toList().asReversed()
+            }
+            return TrafficSnapshot(
+                packets = droppedPackets.get(),
+                bytes = droppedBytes.get(),
+                tcpPackets = tcpPackets.get(),
+                udpPackets = udpPackets.get(),
+                otherPackets = otherPackets.get(),
+                lastActivityAt = lastActivityAt.get(),
+                recent = recent
+            )
+        }
+
+        private fun resetTrafficStats() {
+            droppedPackets.set(0)
+            droppedBytes.set(0)
+            tcpPackets.set(0)
+            udpPackets.set(0)
+            otherPackets.set(0)
+            lastActivityAt.set(0)
+            synchronized(trafficLock) { recentDrops.clear() }
+        }
+
+        private fun recordDroppedPacket(packet: ByteArray, length: Int) {
+            if (length <= 0) return
+            droppedPackets.incrementAndGet()
+            droppedBytes.addAndGet(length.toLong())
+            val now = System.currentTimeMillis()
+            lastActivityAt.set(now)
+
+            val destination = PacketInspector.inspect(packet, length)
+            when (destination?.protocol) {
+                "TCP" -> tcpPackets.incrementAndGet()
+                "UDP" -> udpPackets.incrementAndGet()
+                else -> otherPackets.incrementAndGet()
+            }
+
+            if (destination != null) {
+                val drop = TrafficDrop(
+                    timestamp = now,
+                    protocol = destination.protocol,
+                    destination = destination.address,
+                    port = destination.port
+                )
+                synchronized(trafficLock) {
+                    val last = recentDrops.peekLast()
+                    val sameEndpoint = last != null &&
+                        last.protocol == drop.protocol &&
+                        last.destination == drop.destination &&
+                        last.port == drop.port &&
+                        now - last.timestamp < 1200
+                    if (!sameEndpoint) {
+                        recentDrops.addLast(drop)
+                        while (recentDrops.size > MAX_RECENT_DROPS) recentDrops.removeFirst()
+                    }
+                }
+            }
+        }
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -94,9 +184,7 @@ class GuardianVpnService : VpnService() {
 
     @Synchronized
     private fun rebuildVpn(targetMode: Mode, blockedPackages: Set<String>) {
-        if (vpnInterface != null || mode != Mode.OFF) {
-            stopVpn(logEvent = false)
-        }
+        if (vpnInterface != null || mode != Mode.OFF) stopVpn(logEvent = false)
 
         createNotificationChannel()
 
@@ -118,8 +206,9 @@ class GuardianVpnService : VpnService() {
             runCatching { builder.addDisallowedApplication(packageName) }
         } else {
             blockedPackages.forEach { blockedPackage ->
-                val added = runCatching { builder.addAllowedApplication(blockedPackage) }.isSuccess
-                if (added) effectiveBlockedCount++
+                if (runCatching { builder.addAllowedApplication(blockedPackage) }.isSuccess) {
+                    effectiveBlockedCount++
+                }
             }
             if (effectiveBlockedCount == 0) {
                 GuardianEventStore.append(
@@ -152,6 +241,7 @@ class GuardianVpnService : VpnService() {
             return
         }
 
+        resetTrafficStats()
         mode = targetMode
         GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
 
@@ -186,6 +276,7 @@ class GuardianVpnService : VpnService() {
                 while (draining) {
                     val count = input.read(buffer)
                     if (count < 0) break
+                    if (count > 0) recordDroppedPacket(buffer, count)
                 }
             } catch (_: Throwable) {
                 // Closing the TUN descriptor during shutdown interrupts reads.
@@ -221,11 +312,12 @@ class GuardianVpnService : VpnService() {
         stopForeground(STOP_FOREGROUND_REMOVE)
 
         if (logEvent && wasActive) {
+            val snapshot = trafficSnapshot()
             GuardianEventStore.append(
                 this,
                 "INFO",
                 if (previousMode == Mode.LOCKDOWN) "Lock Down stopped" else "Firewall stopped",
-                "Guardian closed its local VPN interface and returned network routing to Android."
+                "Guardian restored Android networking after dropping ${snapshot.packets} packet(s) / ${snapshot.bytes} byte(s) in this session."
             )
         }
     }
@@ -257,11 +349,7 @@ class GuardianVpnService : VpnService() {
             .setContentIntent(openApp)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(
-                R.drawable.ic_guardian,
-                if (targetMode == Mode.LOCKDOWN) "Stop Lock Down" else "Stop Firewall",
-                stopIntent
-            )
+            .addAction(R.drawable.ic_guardian, "Stop", stopIntent)
             .build()
 
         if (Build.VERSION.SDK_INT >= 34) {
