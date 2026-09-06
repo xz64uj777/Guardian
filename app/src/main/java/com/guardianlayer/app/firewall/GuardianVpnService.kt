@@ -25,6 +25,7 @@ class GuardianVpnService : VpnService() {
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
+    private var packetInput: FileInputStream? = null
     @Volatile private var draining = false
     private var drainThread: Thread? = null
 
@@ -32,7 +33,7 @@ class GuardianVpnService : VpnService() {
         return when (intent?.action) {
             ACTION_STOP -> {
                 stopLockdown(logEvent = true)
-                stopSelf()
+                stopSelfResult(startId)
                 START_NOT_STICKY
             }
             ACTION_LOCKDOWN -> {
@@ -103,16 +104,23 @@ class GuardianVpnService : VpnService() {
 
     private fun startPacketDrain() {
         val descriptor = vpnInterface?.fileDescriptor ?: return
+        val input = FileInputStream(descriptor)
+        packetInput = input
         draining = true
+
         drainThread = Thread({
             val buffer = ByteArray(32767)
-            runCatching {
-                FileInputStream(descriptor).use { input ->
-                    while (draining) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                    }
+            try {
+                while (draining) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
                 }
+            } catch (_: Throwable) {
+                // Closing the VPN descriptor during shutdown is expected to
+                // interrupt a blocking read. Nothing needs to be surfaced.
+            } finally {
+                if (packetInput === input) packetInput = null
+                runCatching { input.close() }
             }
         }, "guardian-lockdown-drain").apply {
             isDaemon = true
@@ -120,14 +128,25 @@ class GuardianVpnService : VpnService() {
         }
     }
 
+    @Synchronized
     private fun stopLockdown(logEvent: Boolean) {
         val wasActive = GuardianStateStore.isLockdownActive(this) || vpnInterface != null
+
+        // Mark inactive first so the UI cannot remain stuck in Lock Down while
+        // Android is tearing down the TUN interface.
+        GuardianStateStore.setLockdownActive(this, false)
         draining = false
-        runCatching { vpnInterface?.close() }
+
+        val input = packetInput
+        packetInput = null
+        runCatching { input?.close() }
+
+        val tun = vpnInterface
         vpnInterface = null
+        runCatching { tun?.close() }
+
         drainThread?.interrupt()
         drainThread = null
-        GuardianStateStore.setLockdownActive(this, false)
         stopForeground(STOP_FOREGROUND_REMOVE)
 
         if (logEvent && wasActive) {
@@ -135,7 +154,7 @@ class GuardianVpnService : VpnService() {
                 this,
                 "INFO",
                 "Lock Down stopped",
-                "Normal Android network routing has been restored."
+                "Guardian closed its local VPN interface and returned network routing to Android."
             )
         }
     }
