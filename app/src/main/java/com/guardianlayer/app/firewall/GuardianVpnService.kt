@@ -338,12 +338,23 @@ class GuardianVpnService : VpnService() {
         if (!shouldLog) return
 
         val source = blockedTrafficSourceDescription()
-        GuardianEventStore.append(
-            this,
-            "INFO",
-            "Blocked DNS request",
-            "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian blocked the packet. Cached lookups and encrypted DNS such as DoH/DoT may not be visible here."
-        )
+        val classification = TrackerDomainClassifier.classify(query.domain)
+
+        if (classification != null) {
+            GuardianEventStore.append(
+                this,
+                "REVIEW",
+                "${classification.category} service observed",
+                "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian's local intelligence matches ${classification.provider} (${classification.matchedDomain}), ${classification.explanation}. The packet was already blocked by your app rule. This is a privacy/telemetry signal, not a malware verdict."
+            )
+        } else {
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Blocked DNS request",
+                "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian blocked the packet. Cached lookups and encrypted DNS such as DoH/DoT may not be visible here."
+            )
+        }
     }
 
     private fun blockedTrafficSourceDescription(): String {
