@@ -1,0 +1,9 @@
+<resources>
+    <color name="guardian_primary">#6C63FF</color>
+    <color name="guardian_primary_dark">#4B45C6</color>
+    <color name="guardian_danger">#D84343</color>
+    <color name="guardian_surface_dark">#111318</color>
+    <color name="guardian_card_dark">#1B1E25</color>
+    <color name="guardian_text_light">#F7F7FA</color>
+    <color name="guardian_muted">#A8ADB7</color>
+</resources>

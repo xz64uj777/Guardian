@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Guardian</string>
+    <string name="lockdown_channel_name">Guardian Lock Down</string>
+    <string name="lockdown_channel_description">Persistent status while Guardian is blocking network traffic.</string>
+</resources>
