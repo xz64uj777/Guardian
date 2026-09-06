@@ -15,6 +15,7 @@ import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
 import java.io.FileInputStream
 import java.util.ArrayDeque
+import java.util.LinkedHashSet
 import java.util.concurrent.atomic.AtomicLong
 
 class GuardianVpnService : VpnService() {
@@ -86,8 +87,11 @@ class GuardianVpnService : VpnService() {
             synchronized(trafficLock) { recentDrops.clear() }
         }
 
-        private fun recordDroppedPacket(packet: ByteArray, length: Int) {
-            if (length <= 0) return
+        private fun recordDroppedPacket(
+            packet: ByteArray,
+            length: Int
+        ): DnsQueryInspector.Query? {
+            if (length <= 0) return null
             droppedPackets.incrementAndGet()
             droppedBytes.addAndGet(length.toLong())
             val now = System.currentTimeMillis()
@@ -120,6 +124,8 @@ class GuardianVpnService : VpnService() {
                     }
                 }
             }
+
+            return DnsQueryInspector.inspect(packet, length)
         }
     }
 
@@ -127,6 +133,12 @@ class GuardianVpnService : VpnService() {
     private var packetInput: FileInputStream? = null
     @Volatile private var draining = false
     private var drainThread: Thread? = null
+
+    @Volatile
+    private var activeBlockedPackages: List<String> = emptyList()
+
+    private val domainLogLock = Any()
+    private val sessionLoggedDomains = LinkedHashSet<String>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
@@ -201,16 +213,16 @@ class GuardianVpnService : VpnService() {
 
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
-        var effectiveBlockedCount = 0
+        val effectiveBlockedPackages = mutableListOf<String>()
         if (targetMode == Mode.LOCKDOWN) {
             runCatching { builder.addDisallowedApplication(packageName) }
         } else {
             blockedPackages.forEach { blockedPackage ->
                 if (runCatching { builder.addAllowedApplication(blockedPackage) }.isSuccess) {
-                    effectiveBlockedCount++
+                    effectiveBlockedPackages += blockedPackage
                 }
             }
-            if (effectiveBlockedCount == 0) {
+            if (effectiveBlockedPackages.isEmpty()) {
                 GuardianEventStore.append(
                     this,
                     "ALERT",
@@ -224,7 +236,7 @@ class GuardianVpnService : VpnService() {
             }
         }
 
-        startForegroundCompat(targetMode, effectiveBlockedCount)
+        startForegroundCompat(targetMode, effectiveBlockedPackages.size)
 
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
@@ -242,6 +254,8 @@ class GuardianVpnService : VpnService() {
         }
 
         resetTrafficStats()
+        synchronized(domainLogLock) { sessionLoggedDomains.clear() }
+        activeBlockedPackages = effectiveBlockedPackages.toList()
         mode = targetMode
         GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
 
@@ -257,7 +271,7 @@ class GuardianVpnService : VpnService() {
                 this,
                 "INFO",
                 "Selective firewall activated",
-                "Guardian is blocking network access for $effectiveBlockedCount selected app(s). Other apps continue using Android's normal network route."
+                "Guardian is blocking network access for ${effectiveBlockedPackages.size} selected app(s). Other apps continue using Android's normal network route."
             )
         }
 
@@ -276,7 +290,10 @@ class GuardianVpnService : VpnService() {
                 while (draining) {
                     val count = input.read(buffer)
                     if (count < 0) break
-                    if (count > 0) recordDroppedPacket(buffer, count)
+                    if (count > 0) {
+                        val dnsQuery = recordDroppedPacket(buffer, count)
+                        if (dnsQuery != null) recordDnsAttempt(dnsQuery)
+                    }
                 }
             } catch (_: Throwable) {
                 // Closing the TUN descriptor during shutdown interrupts reads.
@@ -288,6 +305,50 @@ class GuardianVpnService : VpnService() {
             isDaemon = true
             start()
         }
+    }
+
+    private fun recordDnsAttempt(query: DnsQueryInspector.Query) {
+        val shouldLog = synchronized(domainLogLock) {
+            if (sessionLoggedDomains.contains(query.domain)) {
+                false
+            } else {
+                if (sessionLoggedDomains.size >= 30) {
+                    val oldest = sessionLoggedDomains.firstOrNull()
+                    if (oldest != null) sessionLoggedDomains.remove(oldest)
+                }
+                sessionLoggedDomains.add(query.domain)
+                true
+            }
+        }
+        if (!shouldLog) return
+
+        val source = blockedTrafficSourceDescription()
+        GuardianEventStore.append(
+            this,
+            "INFO",
+            "Blocked DNS request",
+            "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian blocked the packet. Cached lookups and encrypted DNS such as DoH/DoT may not be visible here."
+        )
+    }
+
+    private fun blockedTrafficSourceDescription(): String {
+        if (mode == Mode.LOCKDOWN) return "Blocked device traffic"
+
+        val packages = activeBlockedPackages
+        if (packages.size != 1) {
+            return if (packages.isEmpty()) {
+                "Blocked traffic"
+            } else {
+                "One of ${packages.size} blocked apps"
+            }
+        }
+
+        val blockedPackage = packages.single()
+        val label = runCatching {
+            val info = packageManager.getApplicationInfo(blockedPackage, 0)
+            packageManager.getApplicationLabel(info).toString()
+        }.getOrDefault(blockedPackage)
+        return "$label ($blockedPackage)"
     }
 
     @Synchronized
@@ -309,6 +370,8 @@ class GuardianVpnService : VpnService() {
 
         drainThread?.interrupt()
         drainThread = null
+        activeBlockedPackages = emptyList()
+        synchronized(domainLogLock) { sessionLoggedDomains.clear() }
         stopForeground(STOP_FOREGROUND_REMOVE)
 
         if (logEvent && wasActive) {
