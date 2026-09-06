@@ -8,6 +8,7 @@ import android.net.VpnService
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.LinearLayout
@@ -34,21 +35,24 @@ class MainActivity : AppCompatActivity() {
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) {
-            startLockdown()
-        } else {
-            GuardianEventStore.append(
-                this,
-                "INFO",
-                "VPN permission not granted",
-                "Guardian did not activate Lock Down."
-            )
-            refresh()
-        }
+        if (result.resultCode == RESULT_OK) startLockdown() else refresh()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // App updates preserve SharedPreferences. Never let an old saved flag
+        // pretend the VPN is still active when the service is not actually alive.
+        if (GuardianStateStore.isLockdownActive(this) && !GuardianVpnService.isRunning()) {
+            GuardianStateStore.setLockdownActive(this, false)
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Recovered stale Lock Down state",
+                "Guardian cleared a saved Lock Down flag because no Guardian VPN service was running."
+            )
+        }
+
         setContentView(buildUi())
         refresh()
     }
@@ -63,7 +67,6 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.rgb(17, 19, 24))
             isFillViewport = true
         }
-
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(28), dp(20), dp(36))
@@ -86,6 +89,14 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(lockdownButton.withTop(dp(14)))
 
+        val emergencyButton = MaterialButton(this).apply {
+            text = "EMERGENCY RESTORE NETWORK"
+            textSize = 14f
+            minHeight = dp(52)
+            setOnClickListener { emergencyRestoreNetwork() }
+        }
+        root.addView(emergencyButton.withTop(dp(10)))
+
         val privacyButton = MaterialButton(this).apply {
             text = "RUN PRIVACY SNAPSHOT"
             textSize = 15f
@@ -104,36 +115,58 @@ class MainActivity : AppCompatActivity() {
         root.addView(text("GUARDIAN TIMELINE", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
         timeline = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(timeline.withTop(dp(8)))
-
         return scroll
     }
 
     private fun toggleLockdown() {
-        if (GuardianStateStore.isLockdownActive(this)) {
-            lockdownButton.isEnabled = false
-            lockdownButton.text = "STOPPING LOCK DOWN…"
-
-            // Send the service its explicit stop command instead of relying on
-            // generic service destruction. This ensures the TUN descriptor is
-            // closed before the foreground service exits.
-            startService(
-                Intent(this, GuardianVpnService::class.java)
-                    .setAction(GuardianVpnService.ACTION_STOP)
-            )
-
-            Handler(Looper.getMainLooper()).postDelayed({
-                lockdownButton.isEnabled = true
-                refresh()
-            }, 400)
+        if (GuardianVpnService.isRunning()) {
+            stopGuardianVpn()
             return
         }
 
         val permissionIntent = VpnService.prepare(this)
-        if (permissionIntent != null) {
-            vpnPermissionLauncher.launch(permissionIntent)
-        } else {
-            startLockdown()
+        if (permissionIntent != null) vpnPermissionLauncher.launch(permissionIntent) else startLockdown()
+    }
+
+    private fun stopGuardianVpn() {
+        lockdownButton.isEnabled = false
+        lockdownButton.text = "STOPPING LOCK DOWN…"
+        GuardianStateStore.setLockdownActive(this, false)
+
+        runCatching {
+            startService(
+                Intent(this, GuardianVpnService::class.java)
+                    .setAction(GuardianVpnService.ACTION_STOP)
+            )
         }
+
+        Handler(Looper.getMainLooper()).postDelayed({
+            // Belt-and-suspenders fallback if Android did not deliver ACTION_STOP.
+            runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
+            lockdownButton.isEnabled = true
+            refresh()
+        }, 500)
+    }
+
+    private fun emergencyRestoreNetwork() {
+        GuardianStateStore.setLockdownActive(this, false)
+        runCatching {
+            startService(
+                Intent(this, GuardianVpnService::class.java)
+                    .setAction(GuardianVpnService.ACTION_STOP)
+            )
+        }
+        Handler(Looper.getMainLooper()).postDelayed({
+            runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Emergency network restore requested",
+                "Guardian stopped its VPN service. Android VPN settings were opened so Always-on VPN or Block connections without VPN can also be disabled if enabled."
+            )
+            refresh()
+            runCatching { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }
+        }, 350)
     }
 
     private fun startLockdown() {
@@ -152,11 +185,8 @@ class MainActivity : AppCompatActivity() {
                     "No launcher apps with reviewable permission data were visible to Guardian."
                 } else {
                     snapshot.topApps.joinToString("\n\n") { app ->
-                        val permissions = if (app.grantedSensitivePermissions.isEmpty()) {
-                            "No scored sensitive permissions granted"
-                        } else {
-                            app.grantedSensitivePermissions.joinToString(", ")
-                        }
+                        val permissions = if (app.grantedSensitivePermissions.isEmpty()) "No scored sensitive permissions granted"
+                        else app.grantedSensitivePermissions.joinToString(", ")
                         "${app.label} · exposure ${app.score}/100\n$permissions"
                     }
                 }
@@ -173,11 +203,14 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val active = GuardianStateStore.isLockdownActive(this)
+        val active = GuardianVpnService.isRunning()
+        if (!active && GuardianStateStore.isLockdownActive(this)) {
+            GuardianStateStore.setLockdownActive(this, false)
+        }
         statusView.text = if (active) {
-            "LOCK DOWN ACTIVE\n\nGuardian is blocking device network traffic. Guardian itself remains reachable so you can turn protection off."
+            "LOCK DOWN ACTIVE\n\nGuardian is blocking device network traffic."
         } else {
-            "DEVICE ONLINE\n\nLock Down is off. Guardian is ready to isolate network traffic if you need it."
+            "DEVICE ONLINE\n\nGuardian's Lock Down service is not active."
         }
         statusView.setTextColor(if (active) Color.rgb(255, 160, 160) else Color.WHITE)
         lockdownButton.text = if (active) "STOP LOCK DOWN" else "ACTIVATE LOCK DOWN"
@@ -191,7 +224,6 @@ class MainActivity : AppCompatActivity() {
             timeline.addView(text("Guardian events will appear here as the app observes or changes security state.", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
             return
         }
-
         events.forEach { event ->
             val time = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(event.timestamp))
             val card = LinearLayout(this).apply {
