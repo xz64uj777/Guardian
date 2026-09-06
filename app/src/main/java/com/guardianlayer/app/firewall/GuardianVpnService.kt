@@ -50,6 +50,9 @@ class GuardianVpnService : VpnService() {
         @Volatile
         private var mode = Mode.OFF
 
+        @Volatile
+        private var trafficSourcePrefix = "Blocked traffic"
+
         private val droppedPackets = AtomicLong(0)
         private val droppedBytes = AtomicLong(0)
         private val tcpPackets = AtomicLong(0)
@@ -107,7 +110,7 @@ class GuardianVpnService : VpnService() {
             if (destination != null) {
                 val drop = TrafficDrop(
                     timestamp = now,
-                    protocol = destination.protocol,
+                    protocol = "$trafficSourcePrefix → ${destination.protocol}",
                     destination = destination.address,
                     port = destination.port
                 )
@@ -256,6 +259,7 @@ class GuardianVpnService : VpnService() {
         resetTrafficStats()
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
         activeBlockedPackages = effectiveBlockedPackages.toList()
+        trafficSourcePrefix = trafficSourceLabel(targetMode, effectiveBlockedPackages)
         mode = targetMode
         GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
 
@@ -276,6 +280,17 @@ class GuardianVpnService : VpnService() {
         }
 
         startPacketDrain()
+    }
+
+    private fun trafficSourceLabel(targetMode: Mode, packages: List<String>): String {
+        if (targetMode == Mode.LOCKDOWN) return "Device"
+        if (packages.size != 1) return "One of ${packages.size} blocked apps"
+
+        val blockedPackage = packages.single()
+        return runCatching {
+            val info = packageManager.getApplicationInfo(blockedPackage, 0)
+            packageManager.getApplicationLabel(info).toString()
+        }.getOrDefault(blockedPackage)
     }
 
     private fun startPacketDrain() {
