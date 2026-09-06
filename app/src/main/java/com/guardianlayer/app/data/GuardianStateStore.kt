@@ -11,9 +11,11 @@ object GuardianStateStore {
             .getBoolean(KEY_LOCKDOWN, false)
 
     fun setLockdownActive(context: Context, active: Boolean) {
+        // Lock Down is safety-critical UI state. Commit synchronously so the
+        // app cannot briefly report the old state after the VPN is torn down.
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_LOCKDOWN, active)
-            .apply()
+            .commit()
     }
 }
