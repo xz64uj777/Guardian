@@ -28,6 +28,7 @@ import com.guardianlayer.app.firewall.LauncherAppCatalog
 import com.guardianlayer.app.privacy.InstalledAppRiskAnalyzer
 import java.text.DateFormat
 import java.util.Date
+import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
@@ -36,10 +37,19 @@ class MainActivity : AppCompatActivity() {
     private lateinit var lockdownButton: MaterialButton
     private lateinit var firewallButton: MaterialButton
     private lateinit var firewallStatusView: TextView
+    private lateinit var firewallActivityView: TextView
     private lateinit var firewallApps: LinearLayout
     private lateinit var timeline: LinearLayout
 
+    private val uiHandler = Handler(Looper.getMainLooper())
     private var pendingVpnAction = GuardianVpnService.ACTION_LOCKDOWN
+
+    private val trafficTicker = object : Runnable {
+        override fun run() {
+            if (::firewallActivityView.isInitialized) refreshTrafficActivity()
+            uiHandler.postDelayed(this, 1000)
+        }
+    }
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -78,6 +88,13 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         refresh()
+        uiHandler.removeCallbacks(trafficTicker)
+        uiHandler.post(trafficTicker)
+    }
+
+    override fun onPause() {
+        uiHandler.removeCallbacks(trafficTicker)
+        super.onPause()
     }
 
     private fun buildUi(): ScrollView {
@@ -89,10 +106,23 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(20), dp(28), dp(20), dp(36))
         }
-        scroll.addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        scroll.addView(
+            root,
+            ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
 
         root.addView(text("GUARDIAN", 30f, Color.WHITE, Typeface.BOLD))
-        root.addView(text("Understand. Control. Protect.", 15f, Color.rgb(168, 173, 183), Typeface.NORMAL).withTop(dp(4)))
+        root.addView(
+            text(
+                "Understand. Control. Protect.",
+                15f,
+                Color.rgb(168, 173, 183),
+                Typeface.NORMAL
+            ).withTop(dp(4))
+        )
 
         statusView = text("", 18f, Color.WHITE, Typeface.BOLD).apply {
             setPadding(dp(18), dp(18), dp(18), dp(18))
@@ -115,7 +145,15 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(emergencyButton.withTop(dp(10)))
 
-        root.addView(text("SMART FIREWALL", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
+        root.addView(
+            text(
+                "SMART FIREWALL",
+                13f,
+                Color.rgb(168, 173, 183),
+                Typeface.BOLD
+            ).withTop(dp(28))
+        )
+
         firewallStatusView = text("Loading apps…", 15f, Color.WHITE, Typeface.NORMAL).apply {
             setPadding(dp(16), dp(16), dp(16), dp(16))
             background = rounded(Color.rgb(27, 30, 37), 16f)
@@ -130,6 +168,28 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(firewallButton.withTop(dp(10)))
 
+        root.addView(
+            text(
+                "FIREWALL ACTIVITY",
+                13f,
+                Color.rgb(168, 173, 183),
+                Typeface.BOLD
+            ).withTop(dp(22))
+        )
+        firewallActivityView = text("No blocked traffic recorded yet.", 14f, Color.WHITE, Typeface.NORMAL).apply {
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(Color.rgb(27, 30, 37), 16f)
+        }
+        root.addView(firewallActivityView.withTop(dp(8)))
+
+        root.addView(
+            text(
+                "APP RULES",
+                13f,
+                Color.rgb(168, 173, 183),
+                Typeface.BOLD
+            ).withTop(dp(22))
+        )
         firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(firewallApps.withTop(dp(8)))
 
@@ -141,14 +201,33 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(privacyButton.withTop(dp(18)))
 
-        root.addView(text("PRIVACY SNAPSHOT", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
-        privacyView = text("No snapshot yet. Guardian will review visible launcher apps and explain sensitive permissions that are currently granted.", 15f, Color.WHITE, Typeface.NORMAL).apply {
+        root.addView(
+            text(
+                "PRIVACY SNAPSHOT",
+                13f,
+                Color.rgb(168, 173, 183),
+                Typeface.BOLD
+            ).withTop(dp(28))
+        )
+        privacyView = text(
+            "No snapshot yet. Guardian will review visible launcher apps and explain sensitive permissions that are currently granted.",
+            15f,
+            Color.WHITE,
+            Typeface.NORMAL
+        ).apply {
             setPadding(dp(16), dp(16), dp(16), dp(16))
             background = rounded(Color.rgb(27, 30, 37), 16f)
         }
         root.addView(privacyView.withTop(dp(8)))
 
-        root.addView(text("GUARDIAN TIMELINE", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
+        root.addView(
+            text(
+                "GUARDIAN TIMELINE",
+                13f,
+                Color.rgb(168, 173, 183),
+                Typeface.BOLD
+            ).withTop(dp(28))
+        )
         timeline = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(timeline.withTop(dp(8)))
         return scroll
@@ -187,7 +266,7 @@ class MainActivity : AppCompatActivity() {
     private fun startGuardianVpn(action: String) {
         val intent = Intent(this, GuardianVpnService::class.java).setAction(action)
         ContextCompat.startForegroundService(this, intent)
-        Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 450)
+        uiHandler.postDelayed({ refresh() }, 450)
     }
 
     private fun stopGuardianVpn() {
@@ -202,7 +281,7 @@ class MainActivity : AppCompatActivity() {
             )
         }
 
-        Handler(Looper.getMainLooper()).postDelayed({
+        uiHandler.postDelayed({
             runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
             lockdownButton.isEnabled = true
             firewallButton.isEnabled = true
@@ -218,7 +297,7 @@ class MainActivity : AppCompatActivity() {
                     .setAction(GuardianVpnService.ACTION_STOP)
             )
         }
-        Handler(Looper.getMainLooper()).postDelayed({
+        uiHandler.postDelayed({
             runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
             GuardianEventStore.append(
                 this,
@@ -233,16 +312,32 @@ class MainActivity : AppCompatActivity() {
 
     private fun loadFirewallApps() {
         firewallApps.removeAllViews()
-        firewallApps.addView(text("Loading visible apps…", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
+        firewallApps.addView(
+            text(
+                "Loading visible apps…",
+                14f,
+                Color.rgb(168, 173, 183),
+                Typeface.NORMAL
+            )
+        )
 
         Thread {
             val apps = LauncherAppCatalog(this).load()
             runOnUiThread {
                 firewallApps.removeAllViews()
                 if (apps.isEmpty()) {
-                    firewallApps.addView(text("No launcher apps were visible to Guardian.", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
+                    firewallApps.addView(
+                        text(
+                            "No launcher apps were visible to Guardian.",
+                            14f,
+                            Color.rgb(168, 173, 183),
+                            Typeface.NORMAL
+                        )
+                    )
                 } else {
-                    apps.forEach { app -> firewallApps.addView(buildFirewallRow(app).withTop(dp(6))) }
+                    apps.forEach { app ->
+                        firewallApps.addView(buildFirewallRow(app).withTop(dp(6)))
+                    }
                 }
                 refreshFirewallSummary()
             }
@@ -260,9 +355,19 @@ class MainActivity : AppCompatActivity() {
         val labels = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(text(app.label, 15f, Color.WHITE, Typeface.BOLD))
-            addView(text(app.packageName, 11f, Color.rgb(168, 173, 183), Typeface.NORMAL).withTop(dp(2)))
+            addView(
+                text(
+                    app.packageName,
+                    11f,
+                    Color.rgb(168, 173, 183),
+                    Typeface.NORMAL
+                ).withTop(dp(2))
+            )
         }
-        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(
+            labels,
+            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        )
 
         val ruleButton = MaterialButton(this).apply {
             minWidth = 0
@@ -270,8 +375,15 @@ class MainActivity : AppCompatActivity() {
             textSize = 12f
             updateRuleButton(this, app.packageName)
             setOnClickListener {
-                val nowBlocked = !FirewallRuleStore.isBlocked(this@MainActivity, app.packageName)
-                FirewallRuleStore.setBlocked(this@MainActivity, app.packageName, nowBlocked)
+                val nowBlocked = !FirewallRuleStore.isBlocked(
+                    this@MainActivity,
+                    app.packageName
+                )
+                FirewallRuleStore.setBlocked(
+                    this@MainActivity,
+                    app.packageName,
+                    nowBlocked
+                )
                 updateRuleButton(this, app.packageName)
                 GuardianEventStore.append(
                     this@MainActivity,
@@ -287,11 +399,17 @@ class MainActivity : AppCompatActivity() {
                         Intent(this@MainActivity, GuardianVpnService::class.java)
                             .setAction(GuardianVpnService.ACTION_FIREWALL)
                     )
-                    Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 350)
+                    uiHandler.postDelayed({ refresh() }, 350)
                 }
             }
         }
-        row.addView(ruleButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        row.addView(
+            ruleButton,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        )
         return row
     }
 
@@ -307,9 +425,60 @@ class MainActivity : AppCompatActivity() {
             mode == GuardianVpnService.Mode.FIREWALL ->
                 "FIREWALL ACTIVE · $count app(s) blocked\n\nOnly selected apps are routed into Guardian's blocking VPN. Other apps stay online. Rule changes apply immediately."
             count > 0 ->
-                "$count app(s) marked BLOCKED\n\nStart Firewall to enforce these rules. This milestone blocks selected apps; it does not inspect or forward allowed traffic yet."
+                "$count app(s) marked BLOCKED\n\nStart Firewall to enforce these rules. Guardian only inspects metadata for traffic it is already blocking."
             else ->
                 "No apps blocked yet. Tap BLOCK beside an app, then start the firewall."
+        }
+    }
+
+    private fun refreshTrafficActivity() {
+        val snapshot = GuardianVpnService.trafficSnapshot()
+        val mode = GuardianVpnService.currentMode()
+
+        if (snapshot.packets == 0L) {
+            firewallActivityView.text = when (mode) {
+                GuardianVpnService.Mode.FIREWALL ->
+                    "LIVE SMART FIREWALL\n\nNo blocked packets have reached Guardian yet. Open a blocked app to generate activity."
+                GuardianVpnService.Mode.LOCKDOWN ->
+                    "LIVE LOCK DOWN\n\nNo dropped packets recorded yet."
+                GuardianVpnService.Mode.OFF ->
+                    "No blocked traffic recorded yet. Start Smart Firewall or Lock Down to collect local drop statistics."
+            }
+            return
+        }
+
+        val heading = when (mode) {
+            GuardianVpnService.Mode.FIREWALL -> "LIVE SMART FIREWALL"
+            GuardianVpnService.Mode.LOCKDOWN -> "LIVE LOCK DOWN"
+            GuardianVpnService.Mode.OFF -> "LAST FIREWALL SESSION"
+        }
+
+        val lastActivity = if (snapshot.lastActivityAt > 0) {
+            DateFormat.getTimeInstance(DateFormat.MEDIUM)
+                .format(Date(snapshot.lastActivityAt))
+        } else {
+            "—"
+        }
+
+        val recentText = if (snapshot.recent.isEmpty()) {
+            "No destination metadata parsed yet."
+        } else {
+            snapshot.recent.take(6).joinToString("\n") { drop ->
+                val time = DateFormat.getTimeInstance(DateFormat.SHORT)
+                    .format(Date(drop.timestamp))
+                "• $time · ${drop.protocol} ${formatEndpoint(drop.destination, drop.port)}"
+            }
+        }
+
+        firewallActivityView.text = buildString {
+            append(heading)
+            append("\n\n")
+            append("${snapshot.packets} packets · ${formatBytes(snapshot.bytes)} dropped")
+            append("\nTCP ${snapshot.tcpPackets} · UDP ${snapshot.udpPackets} · Other ${snapshot.otherPackets}")
+            append("\nLast blocked traffic: $lastActivity")
+            append("\n\nRecent blocked destinations\n")
+            append(recentText)
+            append("\n\nIP/port metadata only. Guardian is not decrypting payloads or claiming exact per-app ownership of each packet in this view.")
         }
     }
 
@@ -322,8 +491,11 @@ class MainActivity : AppCompatActivity() {
                     "No launcher apps with reviewable permission data were visible to Guardian."
                 } else {
                     snapshot.topApps.joinToString("\n\n") { app ->
-                        val permissions = if (app.grantedSensitivePermissions.isEmpty()) "No scored sensitive permissions granted"
-                        else app.grantedSensitivePermissions.joinToString(", ")
+                        val permissions = if (app.grantedSensitivePermissions.isEmpty()) {
+                            "No scored sensitive permissions granted"
+                        } else {
+                            app.grantedSensitivePermissions.joinToString(", ")
+                        }
                         "${app.label} · exposure ${app.score}/100\n$permissions"
                     }
                 }
@@ -353,11 +525,23 @@ class MainActivity : AppCompatActivity() {
             GuardianVpnService.Mode.OFF ->
                 "DEVICE ONLINE\n\nGuardian's VPN protection is not currently active."
         }
-        statusView.setTextColor(if (mode == GuardianVpnService.Mode.LOCKDOWN) Color.rgb(255, 160, 160) else Color.WHITE)
-        lockdownButton.text = if (mode == GuardianVpnService.Mode.LOCKDOWN) "STOP LOCK DOWN" else "ACTIVATE LOCK DOWN"
-        firewallButton.text = if (mode == GuardianVpnService.Mode.FIREWALL) "STOP FIREWALL" else "START FIREWALL"
+        statusView.setTextColor(
+            if (mode == GuardianVpnService.Mode.LOCKDOWN) Color.rgb(255, 160, 160)
+            else Color.WHITE
+        )
+        lockdownButton.text = if (mode == GuardianVpnService.Mode.LOCKDOWN) {
+            "STOP LOCK DOWN"
+        } else {
+            "ACTIVATE LOCK DOWN"
+        }
+        firewallButton.text = if (mode == GuardianVpnService.Mode.FIREWALL) {
+            "STOP FIREWALL"
+        } else {
+            "START FIREWALL"
+        }
         firewallButton.isEnabled = mode != GuardianVpnService.Mode.LOCKDOWN
         refreshFirewallSummary()
+        refreshTrafficActivity()
         refreshTimeline()
     }
 
@@ -365,21 +549,61 @@ class MainActivity : AppCompatActivity() {
         timeline.removeAllViews()
         val events = GuardianEventStore.recent(this, 12)
         if (events.isEmpty()) {
-            timeline.addView(text("Guardian events will appear here as the app observes or changes security state.", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
+            timeline.addView(
+                text(
+                    "Guardian events will appear here as the app observes or changes security state.",
+                    14f,
+                    Color.rgb(168, 173, 183),
+                    Typeface.NORMAL
+                )
+            )
             return
         }
+
         events.forEach { event ->
-            val time = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(event.timestamp))
+            val time = DateFormat.getDateTimeInstance(
+                DateFormat.SHORT,
+                DateFormat.SHORT
+            ).format(Date(event.timestamp))
             val card = LinearLayout(this).apply {
                 orientation = LinearLayout.VERTICAL
                 setPadding(dp(16), dp(14), dp(16), dp(14))
                 background = rounded(Color.rgb(27, 30, 37), 14f)
-                addView(text("${event.level} · $time", 11f, Color.rgb(168, 173, 183), Typeface.BOLD))
+                addView(
+                    text(
+                        "${event.level} · $time",
+                        11f,
+                        Color.rgb(168, 173, 183),
+                        Typeface.BOLD
+                    )
+                )
                 addView(text(event.title, 16f, Color.WHITE, Typeface.BOLD).withTop(dp(4)))
-                addView(text(event.detail, 14f, Color.rgb(220, 222, 228), Typeface.NORMAL).withTop(dp(4)))
+                addView(
+                    text(
+                        event.detail,
+                        14f,
+                        Color.rgb(220, 222, 228),
+                        Typeface.NORMAL
+                    ).withTop(dp(4))
+                )
             }
             timeline.addView(card.withTop(dp(8)))
         }
+    }
+
+    private fun formatBytes(bytes: Long): String = when {
+        bytes >= 1024L * 1024L -> String.format(
+            Locale.US,
+            "%.1f MB",
+            bytes / (1024.0 * 1024.0)
+        )
+        bytes >= 1024L -> String.format(Locale.US, "%.1f KB", bytes / 1024.0)
+        else -> "$bytes B"
+    }
+
+    private fun formatEndpoint(address: String, port: Int?): String {
+        if (port == null) return address
+        return if (address.contains(':')) "[$address]:$port" else "$address:$port"
     }
 
     private fun text(value: String, size: Float, color: Int, style: Int) = TextView(this).apply {
@@ -403,5 +627,6 @@ class MainActivity : AppCompatActivity() {
         return this
     }
 
-    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+    private fun dp(value: Int): Int =
+        (value * resources.displayMetrics.density).toInt()
 }
