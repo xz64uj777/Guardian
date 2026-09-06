@@ -22,6 +22,11 @@ class GuardianVpnService : VpnService() {
         const val ACTION_STOP = "com.guardianlayer.app.action.STOP_LOCKDOWN"
         private const val CHANNEL_ID = "guardian_lockdown"
         private const val NOTIFICATION_ID = 7701
+
+        @Volatile
+        private var running = false
+
+        fun isRunning(): Boolean = running
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -51,7 +56,7 @@ class GuardianVpnService : VpnService() {
     }
 
     override fun onDestroy() {
-        stopLockdown(logEvent = GuardianStateStore.isLockdownActive(this))
+        stopLockdown(logEvent = GuardianStateStore.isLockdownActive(this) || running)
         super.onDestroy()
     }
 
@@ -80,6 +85,7 @@ class GuardianVpnService : VpnService() {
 
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
+            running = false
             GuardianStateStore.setLockdownActive(this, false)
             GuardianEventStore.append(
                 this,
@@ -92,6 +98,7 @@ class GuardianVpnService : VpnService() {
             return
         }
 
+        running = true
         GuardianStateStore.setLockdownActive(this, true)
         GuardianEventStore.append(
             this,
@@ -130,10 +137,12 @@ class GuardianVpnService : VpnService() {
 
     @Synchronized
     private fun stopLockdown(logEvent: Boolean) {
-        val wasActive = GuardianStateStore.isLockdownActive(this) || vpnInterface != null
+        val wasActive = GuardianStateStore.isLockdownActive(this) || vpnInterface != null || running
 
-        // Mark inactive first so the UI cannot remain stuck in Lock Down while
-        // Android is tearing down the TUN interface.
+        // Clear both runtime and persisted state before touching the blocking
+        // packet reader. The UI can never remain latched merely because Android
+        // is still finishing TUN teardown.
+        running = false
         GuardianStateStore.setLockdownActive(this, false)
         draining = false
 
