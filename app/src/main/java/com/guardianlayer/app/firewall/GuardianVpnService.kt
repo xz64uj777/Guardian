@@ -17,16 +17,20 @@ import java.io.FileInputStream
 
 class GuardianVpnService : VpnService() {
 
+    enum class Mode { OFF, FIREWALL, LOCKDOWN }
+
     companion object {
         const val ACTION_LOCKDOWN = "com.guardianlayer.app.action.LOCKDOWN"
-        const val ACTION_STOP = "com.guardianlayer.app.action.STOP_LOCKDOWN"
+        const val ACTION_FIREWALL = "com.guardianlayer.app.action.FIREWALL"
+        const val ACTION_STOP = "com.guardianlayer.app.action.STOP_VPN"
         private const val CHANNEL_ID = "guardian_lockdown"
         private const val NOTIFICATION_ID = 7701
 
         @Volatile
-        private var running = false
+        private var mode = Mode.OFF
 
-        fun isRunning(): Boolean = running
+        fun isRunning(): Boolean = mode != Mode.OFF
+        fun currentMode(): Mode = mode
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
@@ -37,7 +41,7 @@ class GuardianVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         return when (intent?.action) {
             ACTION_STOP -> {
-                stopLockdown(logEvent = true)
+                stopVpn(logEvent = true)
                 stopSelfResult(startId)
                 START_NOT_STICKY
             }
@@ -45,29 +49,59 @@ class GuardianVpnService : VpnService() {
                 startLockdown()
                 START_STICKY
             }
+            ACTION_FIREWALL -> {
+                startSelectiveFirewall()
+                if (mode == Mode.FIREWALL) START_STICKY else START_NOT_STICKY
+            }
             else -> START_NOT_STICKY
         }
     }
 
     override fun onRevoke() {
-        stopLockdown(logEvent = true)
+        stopVpn(logEvent = true)
         stopSelf()
         super.onRevoke()
     }
 
     override fun onDestroy() {
-        stopLockdown(logEvent = GuardianStateStore.isLockdownActive(this) || running)
+        stopVpn(logEvent = false)
         super.onDestroy()
     }
 
     private fun startLockdown() {
-        if (vpnInterface != null) return
+        rebuildVpn(Mode.LOCKDOWN, emptySet())
+    }
+
+    private fun startSelectiveFirewall() {
+        val blockedPackages = FirewallRuleStore.blockedPackages(this)
+            .filterNot { it == packageName }
+            .toSet()
+
+        if (blockedPackages.isEmpty()) {
+            stopVpn(logEvent = false)
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Firewall idle",
+                "No apps are marked Blocked, so Guardian did not start a VPN firewall."
+            )
+            stopSelf()
+            return
+        }
+
+        rebuildVpn(Mode.FIREWALL, blockedPackages)
+    }
+
+    @Synchronized
+    private fun rebuildVpn(targetMode: Mode, blockedPackages: Set<String>) {
+        if (vpnInterface != null || mode != Mode.OFF) {
+            stopVpn(logEvent = false)
+        }
 
         createNotificationChannel()
-        startForegroundCompat()
 
         val builder = Builder()
-            .setSession("Guardian Lock Down")
+            .setSession(if (targetMode == Mode.LOCKDOWN) "Guardian Lock Down" else "Guardian Firewall")
             .setMtu(1500)
             .addAddress("10.77.0.1", 32)
             .addRoute("0.0.0.0", 0)
@@ -77,20 +111,40 @@ class GuardianVpnService : VpnService() {
             builder.addRoute("::", 0)
         }
 
-        if (Build.VERSION.SDK_INT >= 29) {
-            builder.setMetered(false)
+        if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
+
+        var effectiveBlockedCount = 0
+        if (targetMode == Mode.LOCKDOWN) {
+            runCatching { builder.addDisallowedApplication(packageName) }
+        } else {
+            blockedPackages.forEach { blockedPackage ->
+                val added = runCatching { builder.addAllowedApplication(blockedPackage) }.isSuccess
+                if (added) effectiveBlockedCount++
+            }
+            if (effectiveBlockedCount == 0) {
+                GuardianEventStore.append(
+                    this,
+                    "ALERT",
+                    "Firewall could not start",
+                    "Guardian could not attach any selected apps to the local VPN."
+                )
+                mode = Mode.OFF
+                GuardianStateStore.setLockdownActive(this, false)
+                stopSelf()
+                return
+            }
         }
 
-        runCatching { builder.addDisallowedApplication(packageName) }
+        startForegroundCompat(targetMode, effectiveBlockedCount)
 
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
-            running = false
+            mode = Mode.OFF
             GuardianStateStore.setLockdownActive(this, false)
             GuardianEventStore.append(
                 this,
                 "ALERT",
-                "Lock Down could not start",
+                if (targetMode == Mode.LOCKDOWN) "Lock Down could not start" else "Firewall could not start",
                 "Android did not create the Guardian VPN interface."
             )
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -98,14 +152,25 @@ class GuardianVpnService : VpnService() {
             return
         }
 
-        running = true
-        GuardianStateStore.setLockdownActive(this, true)
-        GuardianEventStore.append(
-            this,
-            "CRITICAL",
-            "Lock Down activated",
-            "Guardian is routing device traffic into its local VPN interface and discarding it."
-        )
+        mode = targetMode
+        GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
+
+        if (targetMode == Mode.LOCKDOWN) {
+            GuardianEventStore.append(
+                this,
+                "CRITICAL",
+                "Lock Down activated",
+                "Guardian is blocking network traffic for every app except Guardian itself."
+            )
+        } else {
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Selective firewall activated",
+                "Guardian is blocking network access for $effectiveBlockedCount selected app(s). Other apps continue using Android's normal network route."
+            )
+        }
+
         startPacketDrain()
     }
 
@@ -123,26 +188,23 @@ class GuardianVpnService : VpnService() {
                     if (count < 0) break
                 }
             } catch (_: Throwable) {
-                // Closing the VPN descriptor during shutdown is expected to
-                // interrupt a blocking read. Nothing needs to be surfaced.
+                // Closing the TUN descriptor during shutdown interrupts reads.
             } finally {
                 if (packetInput === input) packetInput = null
                 runCatching { input.close() }
             }
-        }, "guardian-lockdown-drain").apply {
+        }, "guardian-vpn-drain").apply {
             isDaemon = true
             start()
         }
     }
 
     @Synchronized
-    private fun stopLockdown(logEvent: Boolean) {
-        val wasActive = GuardianStateStore.isLockdownActive(this) || vpnInterface != null || running
+    private fun stopVpn(logEvent: Boolean) {
+        val previousMode = mode
+        val wasActive = previousMode != Mode.OFF || vpnInterface != null
 
-        // Clear both runtime and persisted state before touching the blocking
-        // packet reader. The UI can never remain latched merely because Android
-        // is still finishing TUN teardown.
-        running = false
+        mode = Mode.OFF
         GuardianStateStore.setLockdownActive(this, false)
         draining = false
 
@@ -162,13 +224,13 @@ class GuardianVpnService : VpnService() {
             GuardianEventStore.append(
                 this,
                 "INFO",
-                "Lock Down stopped",
+                if (previousMode == Mode.LOCKDOWN) "Lock Down stopped" else "Firewall stopped",
                 "Guardian closed its local VPN interface and returned network routing to Android."
             )
         }
     }
 
-    private fun startForegroundCompat() {
+    private fun startForegroundCompat(targetMode: Mode, blockedCount: Int) {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -184,12 +246,22 @@ class GuardianVpnService : VpnService() {
 
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_guardian)
-            .setContentTitle("Guardian Lock Down is active")
-            .setContentText("Device network traffic is blocked until you stop Lock Down.")
+            .setContentTitle(
+                if (targetMode == Mode.LOCKDOWN) "Guardian Lock Down is active"
+                else "Guardian Firewall is active"
+            )
+            .setContentText(
+                if (targetMode == Mode.LOCKDOWN) "Device network traffic is blocked until you stop Lock Down."
+                else "Blocking network access for $blockedCount selected app(s)."
+            )
             .setContentIntent(openApp)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
-            .addAction(R.drawable.ic_guardian, "Stop Lock Down", stopIntent)
+            .addAction(
+                R.drawable.ic_guardian,
+                if (targetMode == Mode.LOCKDOWN) "Stop Lock Down" else "Stop Firewall",
+                stopIntent
+            )
             .build()
 
         if (Build.VERSION.SDK_INT >= 34) {

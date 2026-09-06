@@ -12,6 +12,7 @@ Guardian turns technical device and network behavior into plain-English explanat
 - Permission-risk explanations
 - Local VPN/firewall foundation
 - Real emergency **Lock Down** mode
+- Real per-app network blocking
 - Local behavior/event timeline
 - Privacy exposure scoring
 - Clear review states instead of unsupported malware certainty
@@ -30,33 +31,41 @@ Vscan remains a separate private scanner/security-engine project. Guardian does 
 - Gradle 8.11.1
 - Application ID: `com.guardianlayer.app`
 
-## Current milestone
+## Current milestone: 0.2.0-alpha
 
-`0.1.0-alpha` establishes the Guardian product foundation:
+Guardian now has two real VPN protection modes:
 
-- User-authorized Android `VpnService`
-- IPv4/IPv6 Lock Down routing
-- Packet-drop kill-switch behavior while Lock Down is active
-- Persistent local Guardian event timeline
-- Launcher-app privacy permission snapshot
-- Foreground-service notification and stop action
-- CI debug APK build
+### Emergency Lock Down
 
-### Lock Down behavior
+Lock Down routes device traffic into Guardian's local VPN and discards it. Guardian itself is excluded so the user can always return to the control app and stop protection.
 
-Lock Down is intentionally strict. Once the user grants Android VPN permission and activates it, Guardian routes device traffic into its local VPN interface and discards that traffic until Lock Down is stopped. Guardian itself is excluded so the control app remains usable.
+### Selective per-app firewall
 
-This is the first firewall primitive, not the final per-app firewall. Selective forwarding, per-app allow/block rules, destination intelligence, DNS/tracker classification, and network history are later milestones.
+The user can mark visible launcher apps as **BLOCKED**. When the Smart Firewall is active, only those selected packages are attached to Guardian's VPN via Android `VpnService.Builder.addAllowedApplication(...)`. Their packets are discarded, while unselected apps remain on Android's normal network route.
+
+This provides genuine per-app internet blocking without pretending Guardian already has a full userspace TCP/UDP forwarder.
+
+Current 0.2 behavior:
+
+- Per-app BLOCK / ALLOW rules stored locally
+- Start / stop Smart Firewall independently of Lock Down
+- Rules can be changed while the firewall is running and are reapplied immediately
+- Foreground notification reports which protection mode is active
+- Guardian Timeline records rule changes and firewall state
+- Emergency Restore Network still stops any Guardian VPN mode
+- Stable debug signing allows future CI debug APKs to update the installed test build
+
+## What 0.2 does not claim yet
+
+Selective blocking is not the same thing as full connection monitoring. Guardian does not yet forward allowed traffic, inspect every connection, attribute destinations to apps, or perform tracker/domain filtering. Those require the next networking layer and will be added deliberately rather than mocked.
 
 ## Privacy boundary
 
-Guardian is local-first. Security events and privacy-snapshot results in this milestone remain on-device. No analytics SDK or remote scan upload is included.
+Guardian is local-first. Security events, firewall rules, and privacy-snapshot results remain on-device. No analytics SDK or remote scan upload is included.
 
 ## Build
 
 Android Studio can import the repository directly. CI uses Gradle 8.11.1 and uploads the debug APK as a workflow artifact.
-
-The repository bootstrap workflow generates Guardian's own Gradle wrapper after the first project commit.
 
 ```bash
 ./gradlew :app:assembleDebug

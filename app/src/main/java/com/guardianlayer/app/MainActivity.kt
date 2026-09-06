@@ -10,6 +10,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
+import android.view.View
 import android.view.ViewGroup
 import android.widget.LinearLayout
 import android.widget.ScrollView
@@ -20,7 +21,10 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
+import com.guardianlayer.app.firewall.FirewallApp
+import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
+import com.guardianlayer.app.firewall.LauncherAppCatalog
 import com.guardianlayer.app.privacy.InstalledAppRiskAnalyzer
 import java.text.DateFormat
 import java.util.Date
@@ -30,19 +34,32 @@ class MainActivity : AppCompatActivity() {
     private lateinit var statusView: TextView
     private lateinit var privacyView: TextView
     private lateinit var lockdownButton: MaterialButton
+    private lateinit var firewallButton: MaterialButton
+    private lateinit var firewallStatusView: TextView
+    private lateinit var firewallApps: LinearLayout
     private lateinit var timeline: LinearLayout
+
+    private var pendingVpnAction = GuardianVpnService.ACTION_LOCKDOWN
 
     private val vpnPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
-        if (result.resultCode == RESULT_OK) startLockdown() else refresh()
+        if (result.resultCode == RESULT_OK) {
+            startGuardianVpn(pendingVpnAction)
+        } else {
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "VPN permission not granted",
+                "Guardian did not start the requested network protection mode."
+            )
+            refresh()
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // App updates preserve SharedPreferences. Never let an old saved flag
-        // pretend the VPN is still active when the service is not actually alive.
         if (GuardianStateStore.isLockdownActive(this) && !GuardianVpnService.isRunning()) {
             GuardianStateStore.setLockdownActive(this, false)
             GuardianEventStore.append(
@@ -54,6 +71,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         setContentView(buildUi())
+        loadFirewallApps()
         refresh()
     }
 
@@ -97,13 +115,31 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(emergencyButton.withTop(dp(10)))
 
+        root.addView(text("SMART FIREWALL", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
+        firewallStatusView = text("Loading apps…", 15f, Color.WHITE, Typeface.NORMAL).apply {
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(Color.rgb(27, 30, 37), 16f)
+        }
+        root.addView(firewallStatusView.withTop(dp(8)))
+
+        firewallButton = MaterialButton(this).apply {
+            text = "START FIREWALL"
+            textSize = 15f
+            minHeight = dp(52)
+            setOnClickListener { toggleFirewall() }
+        }
+        root.addView(firewallButton.withTop(dp(10)))
+
+        firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(firewallApps.withTop(dp(8)))
+
         val privacyButton = MaterialButton(this).apply {
             text = "RUN PRIVACY SNAPSHOT"
             textSize = 15f
             minHeight = dp(52)
             setOnClickListener { runPrivacySnapshot() }
         }
-        root.addView(privacyButton.withTop(dp(10)))
+        root.addView(privacyButton.withTop(dp(18)))
 
         root.addView(text("PRIVACY SNAPSHOT", 13f, Color.rgb(168, 173, 183), Typeface.BOLD).withTop(dp(28)))
         privacyView = text("No snapshot yet. Guardian will review visible launcher apps and explain sensitive permissions that are currently granted.", 15f, Color.WHITE, Typeface.NORMAL).apply {
@@ -119,18 +155,44 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleLockdown() {
-        if (GuardianVpnService.isRunning()) {
+        if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.LOCKDOWN) {
+            stopGuardianVpn()
+            return
+        }
+        requestVpnStart(GuardianVpnService.ACTION_LOCKDOWN)
+    }
+
+    private fun toggleFirewall() {
+        if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.FIREWALL) {
             stopGuardianVpn()
             return
         }
 
+        val blockedCount = FirewallRuleStore.blockedCount(this)
+        if (blockedCount == 0) {
+            firewallStatusView.text = "Choose at least one app and tap BLOCK before starting the firewall."
+            return
+        }
+
+        requestVpnStart(GuardianVpnService.ACTION_FIREWALL)
+    }
+
+    private fun requestVpnStart(action: String) {
+        pendingVpnAction = action
         val permissionIntent = VpnService.prepare(this)
-        if (permissionIntent != null) vpnPermissionLauncher.launch(permissionIntent) else startLockdown()
+        if (permissionIntent != null) vpnPermissionLauncher.launch(permissionIntent)
+        else startGuardianVpn(action)
+    }
+
+    private fun startGuardianVpn(action: String) {
+        val intent = Intent(this, GuardianVpnService::class.java).setAction(action)
+        ContextCompat.startForegroundService(this, intent)
+        Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 450)
     }
 
     private fun stopGuardianVpn() {
         lockdownButton.isEnabled = false
-        lockdownButton.text = "STOPPING LOCK DOWN…"
+        firewallButton.isEnabled = false
         GuardianStateStore.setLockdownActive(this, false)
 
         runCatching {
@@ -141,9 +203,9 @@ class MainActivity : AppCompatActivity() {
         }
 
         Handler(Looper.getMainLooper()).postDelayed({
-            // Belt-and-suspenders fallback if Android did not deliver ACTION_STOP.
             runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
             lockdownButton.isEnabled = true
+            firewallButton.isEnabled = true
             refresh()
         }, 500)
     }
@@ -162,18 +224,93 @@ class MainActivity : AppCompatActivity() {
                 this,
                 "INFO",
                 "Emergency network restore requested",
-                "Guardian stopped its VPN service. Android VPN settings were opened so Always-on VPN or Block connections without VPN can also be disabled if enabled."
+                "Guardian stopped its VPN service. Android VPN settings were opened so system-level VPN restrictions can also be disabled if needed."
             )
             refresh()
             runCatching { startActivity(Intent(Settings.ACTION_VPN_SETTINGS)) }
         }, 350)
     }
 
-    private fun startLockdown() {
-        val intent = Intent(this, GuardianVpnService::class.java)
-            .setAction(GuardianVpnService.ACTION_LOCKDOWN)
-        ContextCompat.startForegroundService(this, intent)
-        Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 350)
+    private fun loadFirewallApps() {
+        firewallApps.removeAllViews()
+        firewallApps.addView(text("Loading visible apps…", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
+
+        Thread {
+            val apps = LauncherAppCatalog(this).load()
+            runOnUiThread {
+                firewallApps.removeAllViews()
+                if (apps.isEmpty()) {
+                    firewallApps.addView(text("No launcher apps were visible to Guardian.", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL))
+                } else {
+                    apps.forEach { app -> firewallApps.addView(buildFirewallRow(app).withTop(dp(6))) }
+                }
+                refreshFirewallSummary()
+            }
+        }.start()
+    }
+
+    private fun buildFirewallRow(app: FirewallApp): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(10), dp(10), dp(10))
+            background = rounded(Color.rgb(27, 30, 37), 14f)
+        }
+
+        val labels = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(text(app.label, 15f, Color.WHITE, Typeface.BOLD))
+            addView(text(app.packageName, 11f, Color.rgb(168, 173, 183), Typeface.NORMAL).withTop(dp(2)))
+        }
+        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        val ruleButton = MaterialButton(this).apply {
+            minWidth = 0
+            minimumWidth = 0
+            textSize = 12f
+            updateRuleButton(this, app.packageName)
+            setOnClickListener {
+                val nowBlocked = !FirewallRuleStore.isBlocked(this@MainActivity, app.packageName)
+                FirewallRuleStore.setBlocked(this@MainActivity, app.packageName, nowBlocked)
+                updateRuleButton(this, app.packageName)
+                GuardianEventStore.append(
+                    this@MainActivity,
+                    "INFO",
+                    if (nowBlocked) "App blocked" else "App allowed",
+                    "${app.label} (${app.packageName}) ${if (nowBlocked) "will be routed into Guardian's blocking VPN" else "will use Android's normal network route"}."
+                )
+                refreshFirewallSummary()
+                refreshTimeline()
+
+                if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.FIREWALL) {
+                    startService(
+                        Intent(this@MainActivity, GuardianVpnService::class.java)
+                            .setAction(GuardianVpnService.ACTION_FIREWALL)
+                    )
+                    Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 350)
+                }
+            }
+        }
+        row.addView(ruleButton, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        return row
+    }
+
+    private fun updateRuleButton(button: MaterialButton, packageName: String) {
+        val blocked = FirewallRuleStore.isBlocked(this, packageName)
+        button.text = if (blocked) "ALLOW" else "BLOCK"
+    }
+
+    private fun refreshFirewallSummary() {
+        val count = FirewallRuleStore.blockedCount(this)
+        val mode = GuardianVpnService.currentMode()
+        firewallStatusView.text = when {
+            mode == GuardianVpnService.Mode.FIREWALL ->
+                "FIREWALL ACTIVE · $count app(s) blocked\n\nOnly selected apps are routed into Guardian's blocking VPN. Other apps stay online. Rule changes apply immediately."
+            count > 0 ->
+                "$count app(s) marked BLOCKED\n\nStart Firewall to enforce these rules. This milestone blocks selected apps; it does not inspect or forward allowed traffic yet."
+            else ->
+                "No apps blocked yet. Tap BLOCK beside an app, then start the firewall."
+        }
     }
 
     private fun runPrivacySnapshot() {
@@ -203,17 +340,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun refresh() {
-        val active = GuardianVpnService.isRunning()
-        if (!active && GuardianStateStore.isLockdownActive(this)) {
+        val mode = GuardianVpnService.currentMode()
+        if (mode == GuardianVpnService.Mode.OFF && GuardianStateStore.isLockdownActive(this)) {
             GuardianStateStore.setLockdownActive(this, false)
         }
-        statusView.text = if (active) {
-            "LOCK DOWN ACTIVE\n\nGuardian is blocking device network traffic."
-        } else {
-            "DEVICE ONLINE\n\nGuardian's Lock Down service is not active."
+
+        statusView.text = when (mode) {
+            GuardianVpnService.Mode.LOCKDOWN ->
+                "LOCK DOWN ACTIVE\n\nGuardian is blocking network traffic for the device."
+            GuardianVpnService.Mode.FIREWALL ->
+                "FIREWALL ACTIVE\n\n${FirewallRuleStore.blockedCount(this)} selected app(s) are blocked while other apps remain online."
+            GuardianVpnService.Mode.OFF ->
+                "DEVICE ONLINE\n\nGuardian's VPN protection is not currently active."
         }
-        statusView.setTextColor(if (active) Color.rgb(255, 160, 160) else Color.WHITE)
-        lockdownButton.text = if (active) "STOP LOCK DOWN" else "ACTIVATE LOCK DOWN"
+        statusView.setTextColor(if (mode == GuardianVpnService.Mode.LOCKDOWN) Color.rgb(255, 160, 160) else Color.WHITE)
+        lockdownButton.text = if (mode == GuardianVpnService.Mode.LOCKDOWN) "STOP LOCK DOWN" else "ACTIVATE LOCK DOWN"
+        firewallButton.text = if (mode == GuardianVpnService.Mode.FIREWALL) "STOP FIREWALL" else "START FIREWALL"
+        firewallButton.isEnabled = mode != GuardianVpnService.Mode.LOCKDOWN
+        refreshFirewallSummary()
         refreshTimeline()
     }
 
@@ -251,7 +395,7 @@ class MainActivity : AppCompatActivity() {
         cornerRadius = dp(radiusDp.toInt()).toFloat()
     }
 
-    private fun <T : android.view.View> T.withTop(top: Int): T {
+    private fun <T : View> T.withTop(top: Int): T {
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT
