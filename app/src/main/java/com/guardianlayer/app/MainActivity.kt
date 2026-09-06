@@ -110,8 +110,21 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleLockdown() {
         if (GuardianStateStore.isLockdownActive(this)) {
-            stopService(Intent(this, GuardianVpnService::class.java))
-            Handler(Looper.getMainLooper()).postDelayed({ refresh() }, 250)
+            lockdownButton.isEnabled = false
+            lockdownButton.text = "STOPPING LOCK DOWN…"
+
+            // Send the service its explicit stop command instead of relying on
+            // generic service destruction. This ensures the TUN descriptor is
+            // closed before the foreground service exits.
+            startService(
+                Intent(this, GuardianVpnService::class.java)
+                    .setAction(GuardianVpnService.ACTION_STOP)
+            )
+
+            Handler(Looper.getMainLooper()).postDelayed({
+                lockdownButton.isEnabled = true
+                refresh()
+            }, 400)
             return
         }
 
