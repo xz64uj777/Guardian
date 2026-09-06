@@ -11,15 +11,28 @@ android {
         applicationId = "com.guardianlayer.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2-alpha"
+        versionCode = 4
+        versionName = "0.1.3-alpha"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    // Test/debug builds use one stable key so APKs produced by separate CI
+    // runs can update each other on a physical device. This key is intentionally
+    // debug-only and must never be used for a production release.
+    signingConfigs {
+        create("guardianDebug") {
+            storeFile = file("guardian-debug.jks")
+            storePassword = "guardian123"
+            keyAlias = "guardian-debug"
+            keyPassword = "guardian123"
+        }
     }
 
     buildTypes {
         debug {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
+            signingConfig = signingConfigs.getByName("guardianDebug")
         }
         release {
             isMinifyEnabled = true
