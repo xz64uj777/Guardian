@@ -26,6 +26,30 @@ class TrackerDomainClassifierTest {
     }
 
     @Test
+    fun classifiesAdvertisingVendorSubdomain() {
+        val result = TrackerDomainClassifier.classify("a.example.applovin.com")
+
+        assertNotNull(result)
+        assertEquals("Advertising", result!!.category)
+        assertEquals("AppLovin", result.provider)
+    }
+
+    @Test
+    fun classifiesSessionReplayVendor() {
+        val result = TrackerDomainClassifier.classify("edge.fullstory.com")
+
+        assertNotNull(result)
+        assertEquals("Session replay", result!!.category)
+        assertEquals("FullStory", result.provider)
+    }
+
+    @Test
+    fun doesNotMatchLookalikeSuffix() {
+        assertNull(TrackerDomainClassifier.classify("notdoubleclick.net"))
+        assertNull(TrackerDomainClassifier.classify("exampleapp-measurement.com"))
+    }
+
+    @Test
     fun doesNotFlagUnlistedDomain() {
         assertNull(TrackerDomainClassifier.classify("example.com"))
     }
