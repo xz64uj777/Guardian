@@ -5,6 +5,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -14,13 +15,19 @@ import com.guardianlayer.app.R
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
 import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.SocketTimeoutException
 import java.util.ArrayDeque
 import java.util.LinkedHashSet
 import java.util.concurrent.atomic.AtomicLong
 
 class GuardianVpnService : VpnService() {
 
-    enum class Mode { OFF, FIREWALL, LOCKDOWN }
+    enum class Mode { OFF, FIREWALL, TRACKER_SHIELD, LOCKDOWN }
 
     data class TrafficDrop(
         val timestamp: Long,
@@ -29,26 +36,49 @@ class GuardianVpnService : VpnService() {
         val port: Int?
     )
 
+    data class DnsActivity(
+        val timestamp: Long,
+        val sourceLabel: String,
+        val sourcePackage: String?,
+        val domain: String,
+        val category: String?,
+        val provider: String?,
+        val blockedByTrackerShield: Boolean
+    )
+
     data class TrafficSnapshot(
+        val sessionMode: Mode,
         val packets: Long,
         val bytes: Long,
         val tcpPackets: Long,
         val udpPackets: Long,
         val otherPackets: Long,
         val lastActivityAt: Long,
-        val recent: List<TrafficDrop>
+        val recent: List<TrafficDrop>,
+        val dnsQueries: Long,
+        val trackerQueriesBlocked: Long,
+        val dnsQueriesForwarded: Long,
+        val dnsFailures: Long,
+        val recentDns: List<DnsActivity>
     )
 
     companion object {
         const val ACTION_LOCKDOWN = "com.guardianlayer.app.action.LOCKDOWN"
         const val ACTION_FIREWALL = "com.guardianlayer.app.action.FIREWALL"
+        const val ACTION_TRACKER_SHIELD = "com.guardianlayer.app.action.TRACKER_SHIELD"
         const val ACTION_STOP = "com.guardianlayer.app.action.STOP_VPN"
+
         private const val CHANNEL_ID = "guardian_lockdown"
         private const val NOTIFICATION_ID = 7701
         private const val MAX_RECENT_DROPS = 12
+        private const val MAX_RECENT_DNS = 20
+        private const val VIRTUAL_DNS = "10.77.0.2"
 
         @Volatile
         private var mode = Mode.OFF
+
+        @Volatile
+        private var lastSessionMode = Mode.OFF
 
         @Volatile
         private var trafficSourcePrefix = "Blocked traffic"
@@ -59,41 +89,57 @@ class GuardianVpnService : VpnService() {
         private val udpPackets = AtomicLong(0)
         private val otherPackets = AtomicLong(0)
         private val lastActivityAt = AtomicLong(0)
+        private val dnsQueries = AtomicLong(0)
+        private val trackerQueriesBlocked = AtomicLong(0)
+        private val dnsQueriesForwarded = AtomicLong(0)
+        private val dnsFailures = AtomicLong(0)
+
         private val trafficLock = Any()
         private val recentDrops = ArrayDeque<TrafficDrop>()
+        private val recentDns = ArrayDeque<DnsActivity>()
 
         fun isRunning(): Boolean = mode != Mode.OFF
         fun currentMode(): Mode = mode
 
         fun trafficSnapshot(): TrafficSnapshot {
-            val recent = synchronized(trafficLock) {
-                recentDrops.toList().asReversed()
-            }
+            val drops = synchronized(trafficLock) { recentDrops.toList().asReversed() }
+            val dns = synchronized(trafficLock) { recentDns.toList().asReversed() }
             return TrafficSnapshot(
+                sessionMode = if (mode == Mode.OFF) lastSessionMode else mode,
                 packets = droppedPackets.get(),
                 bytes = droppedBytes.get(),
                 tcpPackets = tcpPackets.get(),
                 udpPackets = udpPackets.get(),
                 otherPackets = otherPackets.get(),
                 lastActivityAt = lastActivityAt.get(),
-                recent = recent
+                recent = drops,
+                dnsQueries = dnsQueries.get(),
+                trackerQueriesBlocked = trackerQueriesBlocked.get(),
+                dnsQueriesForwarded = dnsQueriesForwarded.get(),
+                dnsFailures = dnsFailures.get(),
+                recentDns = dns
             )
         }
 
-        private fun resetTrafficStats() {
+        private fun resetTrafficStats(targetMode: Mode) {
+            lastSessionMode = targetMode
             droppedPackets.set(0)
             droppedBytes.set(0)
             tcpPackets.set(0)
             udpPackets.set(0)
             otherPackets.set(0)
             lastActivityAt.set(0)
-            synchronized(trafficLock) { recentDrops.clear() }
+            dnsQueries.set(0)
+            trackerQueriesBlocked.set(0)
+            dnsQueriesForwarded.set(0)
+            dnsFailures.set(0)
+            synchronized(trafficLock) {
+                recentDrops.clear()
+                recentDns.clear()
+            }
         }
 
-        private fun recordDroppedPacket(
-            packet: ByteArray,
-            length: Int
-        ): DnsQueryInspector.Query? {
+        private fun recordDroppedPacket(packet: ByteArray, length: Int): DnsQueryInspector.Query? {
             if (length <= 0) return null
             droppedPackets.incrementAndGet()
             droppedBytes.addAndGet(length.toLong())
@@ -130,15 +176,33 @@ class GuardianVpnService : VpnService() {
 
             return DnsQueryInspector.inspect(packet, length)
         }
+
+        private fun recordDnsActivity(activity: DnsActivity) {
+            lastActivityAt.set(activity.timestamp)
+            synchronized(trafficLock) {
+                val last = recentDns.peekLast()
+                val duplicate = last != null &&
+                    last.domain == activity.domain &&
+                    last.sourcePackage == activity.sourcePackage &&
+                    last.blockedByTrackerShield == activity.blockedByTrackerShield &&
+                    activity.timestamp - last.timestamp < 1200
+                if (!duplicate) {
+                    recentDns.addLast(activity)
+                    while (recentDns.size > MAX_RECENT_DNS) recentDns.removeFirst()
+                }
+            }
+        }
     }
 
     private var vpnInterface: ParcelFileDescriptor? = null
     private var packetInput: FileInputStream? = null
+    private var packetOutput: FileOutputStream? = null
+    private var dnsSocket: DatagramSocket? = null
     @Volatile private var draining = false
     private var drainThread: Thread? = null
 
     @Volatile
-    private var activeBlockedPackages: List<String> = emptyList()
+    private var activeVpnPackages: List<String> = emptyList()
 
     private val domainLogLock = Any()
     private val sessionLoggedDomains = LinkedHashSet<String>()
@@ -158,6 +222,10 @@ class GuardianVpnService : VpnService() {
                 startSelectiveFirewall()
                 if (mode == Mode.FIREWALL) START_STICKY else START_NOT_STICKY
             }
+            ACTION_TRACKER_SHIELD -> {
+                startTrackerShield()
+                if (mode == Mode.TRACKER_SHIELD) START_STICKY else START_NOT_STICKY
+            }
             else -> START_NOT_STICKY
         }
     }
@@ -174,7 +242,7 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startLockdown() {
-        rebuildVpn(Mode.LOCKDOWN, emptySet())
+        rebuildBlockingVpn(Mode.LOCKDOWN, emptySet())
     }
 
     private fun startSelectiveFirewall() {
@@ -194,13 +262,33 @@ class GuardianVpnService : VpnService() {
             return
         }
 
-        rebuildVpn(Mode.FIREWALL, blockedPackages)
+        rebuildBlockingVpn(Mode.FIREWALL, blockedPackages)
+    }
+
+    private fun startTrackerShield() {
+        val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
+            .filterNot { it == packageName }
+            .toSet()
+
+        if (protectedPackages.isEmpty()) {
+            stopVpn(logEvent = false)
+            GuardianEventStore.append(
+                this,
+                "INFO",
+                "Tracker Shield idle",
+                "No apps are marked Shielded, so Guardian did not start Tracker Shield."
+            )
+            stopSelf()
+            return
+        }
+
+        val upstream = resolveUpstreamDns()
+        rebuildTrackerShield(protectedPackages, upstream)
     }
 
     @Synchronized
-    private fun rebuildVpn(targetMode: Mode, blockedPackages: Set<String>) {
+    private fun rebuildBlockingVpn(targetMode: Mode, blockedPackages: Set<String>) {
         if (vpnInterface != null || mode != Mode.OFF) stopVpn(logEvent = false)
-
         createNotificationChannel()
 
         val builder = Builder()
@@ -208,6 +296,7 @@ class GuardianVpnService : VpnService() {
             .setMtu(1500)
             .addAddress("10.77.0.1", 32)
             .addRoute("0.0.0.0", 0)
+            .setBlocking(true)
 
         runCatching {
             builder.addAddress("fd00:77::1", 128)
@@ -216,50 +305,35 @@ class GuardianVpnService : VpnService() {
 
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
-        val effectiveBlockedPackages = mutableListOf<String>()
+        val effectivePackages = mutableListOf<String>()
         if (targetMode == Mode.LOCKDOWN) {
             runCatching { builder.addDisallowedApplication(packageName) }
         } else {
             blockedPackages.forEach { blockedPackage ->
                 if (runCatching { builder.addAllowedApplication(blockedPackage) }.isSuccess) {
-                    effectiveBlockedPackages += blockedPackage
+                    effectivePackages += blockedPackage
                 }
             }
-            if (effectiveBlockedPackages.isEmpty()) {
-                GuardianEventStore.append(
-                    this,
-                    "ALERT",
-                    "Firewall could not start",
-                    "Guardian could not attach any selected apps to the local VPN."
-                )
-                mode = Mode.OFF
-                GuardianStateStore.setLockdownActive(this, false)
-                stopSelf()
+            if (effectivePackages.isEmpty()) {
+                failToStart("Firewall could not start", "Guardian could not attach any selected apps to the local VPN.")
                 return
             }
         }
 
-        startForegroundCompat(targetMode, effectiveBlockedPackages.size)
-
+        startForegroundCompat(targetMode, effectivePackages.size)
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
-            mode = Mode.OFF
-            GuardianStateStore.setLockdownActive(this, false)
-            GuardianEventStore.append(
-                this,
-                "ALERT",
+            failToStart(
                 if (targetMode == Mode.LOCKDOWN) "Lock Down could not start" else "Firewall could not start",
                 "Android did not create the Guardian VPN interface."
             )
-            stopForeground(STOP_FOREGROUND_REMOVE)
-            stopSelf()
             return
         }
 
-        resetTrafficStats()
+        resetTrafficStats(targetMode)
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
-        activeBlockedPackages = effectiveBlockedPackages.toList()
-        trafficSourcePrefix = trafficSourceLabel(targetMode, effectiveBlockedPackages)
+        activeVpnPackages = effectivePackages.toList()
+        trafficSourcePrefix = trafficSourceLabel(targetMode, effectivePackages)
         mode = targetMode
         GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
 
@@ -275,25 +349,87 @@ class GuardianVpnService : VpnService() {
                 this,
                 "INFO",
                 "Selective firewall activated",
-                "Guardian is blocking network access for ${effectiveBlockedPackages.size} selected app(s). Other apps continue using Android's normal network route."
+                "Guardian is blocking network access for ${effectivePackages.size} selected app(s). Other apps continue using Android's normal network route."
             )
         }
 
-        startPacketDrain()
+        startBlockingPacketDrain()
+    }
+
+    @Synchronized
+    private fun rebuildTrackerShield(protectedPackages: Set<String>, upstreamDns: InetAddress) {
+        if (vpnInterface != null || mode != Mode.OFF) stopVpn(logEvent = false)
+        createNotificationChannel()
+
+        val builder = Builder()
+            .setSession("Guardian Tracker Shield")
+            .setMtu(1500)
+            .addAddress("10.77.0.1", 32)
+            .addDnsServer(VIRTUAL_DNS)
+            .addRoute(VIRTUAL_DNS, 32)
+            .setBlocking(true)
+
+        if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
+
+        val effectivePackages = mutableListOf<String>()
+        protectedPackages.forEach { protectedPackage ->
+            if (runCatching { builder.addAllowedApplication(protectedPackage) }.isSuccess) {
+                effectivePackages += protectedPackage
+            }
+        }
+
+        if (effectivePackages.isEmpty()) {
+            failToStart("Tracker Shield could not start", "Guardian could not attach any shielded apps to its DNS filtering VPN.")
+            return
+        }
+
+        startForegroundCompat(Mode.TRACKER_SHIELD, effectivePackages.size)
+        vpnInterface = runCatching { builder.establish() }.getOrNull()
+        if (vpnInterface == null) {
+            failToStart("Tracker Shield could not start", "Android did not create the Guardian DNS filtering VPN interface.")
+            return
+        }
+
+        resetTrafficStats(Mode.TRACKER_SHIELD)
+        synchronized(domainLogLock) { sessionLoggedDomains.clear() }
+        activeVpnPackages = effectivePackages.toList()
+        trafficSourcePrefix = trafficSourceLabel(Mode.TRACKER_SHIELD, effectivePackages)
+        mode = Mode.TRACKER_SHIELD
+        GuardianStateStore.setLockdownActive(this, false)
+
+        GuardianEventStore.append(
+            this,
+            "INFO",
+            "Tracker Shield activated",
+            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online. Encrypted DNS, cached destinations, and direct-IP traffic may bypass this first DNS-only shield."
+        )
+
+        startTrackerDnsLoop(upstreamDns)
+    }
+
+    private fun failToStart(title: String, detail: String) {
+        mode = Mode.OFF
+        GuardianStateStore.setLockdownActive(this, false)
+        GuardianEventStore.append(this, "ALERT", title, detail)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     private fun trafficSourceLabel(targetMode: Mode, packages: List<String>): String {
         if (targetMode == Mode.LOCKDOWN) return "Device"
-        if (packages.size != 1) return "One of ${packages.size} blocked apps"
-
-        val blockedPackage = packages.single()
-        return runCatching {
-            val info = packageManager.getApplicationInfo(blockedPackage, 0)
-            packageManager.getApplicationLabel(info).toString()
-        }.getOrDefault(blockedPackage)
+        if (packages.size != 1) {
+            val noun = if (targetMode == Mode.TRACKER_SHIELD) "shielded apps" else "blocked apps"
+            return "One of ${packages.size} $noun"
+        }
+        return appLabel(packages.single())
     }
 
-    private fun startPacketDrain() {
+    private fun appLabel(packageName: String): String = runCatching {
+        val info = packageManager.getApplicationInfo(packageName, 0)
+        packageManager.getApplicationLabel(info).toString()
+    }.getOrDefault(packageName)
+
+    private fun startBlockingPacketDrain() {
         val descriptor = vpnInterface?.fileDescriptor ?: return
         val input = FileInputStream(descriptor)
         packetInput = input
@@ -307,7 +443,7 @@ class GuardianVpnService : VpnService() {
                     if (count < 0) break
                     if (count > 0) {
                         val dnsQuery = recordDroppedPacket(buffer, count)
-                        if (dnsQuery != null) recordDnsAttempt(dnsQuery)
+                        if (dnsQuery != null) recordBlockingDnsAttempt(dnsQuery)
                     }
                 }
             } catch (_: Throwable) {
@@ -322,59 +458,212 @@ class GuardianVpnService : VpnService() {
         }
     }
 
-    private fun recordDnsAttempt(query: DnsQueryInspector.Query) {
-        val shouldLog = synchronized(domainLogLock) {
-            if (sessionLoggedDomains.contains(query.domain)) {
-                false
-            } else {
-                if (sessionLoggedDomains.size >= 30) {
-                    val oldest = sessionLoggedDomains.firstOrNull()
-                    if (oldest != null) sessionLoggedDomains.remove(oldest)
-                }
-                sessionLoggedDomains.add(query.domain)
-                true
-            }
+    private fun startTrackerDnsLoop(upstreamDns: InetAddress) {
+        val descriptor = vpnInterface?.fileDescriptor ?: return
+        val input = FileInputStream(descriptor)
+        val output = FileOutputStream(descriptor)
+        val socket = DatagramSocket().apply { soTimeout = 1800 }
+        if (!protect(socket)) {
+            runCatching { socket.close() }
+            GuardianEventStore.append(
+                this,
+                "ALERT",
+                "Tracker Shield upstream protection failed",
+                "Guardian could not exempt its DNS forwarding socket from the VPN. Tracker Shield was stopped to avoid a DNS loop."
+            )
+            stopVpn(logEvent = false)
+            stopSelf()
+            return
         }
-        if (!shouldLog) return
 
-        val source = blockedTrafficSourceDescription()
+        packetInput = input
+        packetOutput = output
+        dnsSocket = socket
+        draining = true
+
+        drainThread = Thread({
+            val buffer = ByteArray(32767)
+            try {
+                while (draining) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    if (count == 0) continue
+
+                    val request = DnsPacketCodec.parseIpv4UdpRequest(buffer, count)
+                    if (request == null) {
+                        dnsFailures.incrementAndGet()
+                        continue
+                    }
+
+                    dnsQueries.incrementAndGet()
+                    lastActivityAt.set(System.currentTimeMillis())
+                    val classification = TrackerDomainClassifier.classify(request.domain)
+                    val sourcePackage = activeVpnPackages.singleOrNull()
+                    val sourceLabel = sourcePackage?.let(::appLabel)
+                        ?: "One of ${activeVpnPackages.size} shielded apps"
+
+                    val dnsResponse = if (classification != null) {
+                        trackerQueriesBlocked.incrementAndGet()
+                        recordTrackerShieldDns(
+                            request.domain,
+                            classification,
+                            sourcePackage,
+                            sourceLabel
+                        )
+                        DnsPacketCodec.buildNxDomainPayload(request.dnsPayload)
+                    } else {
+                        val forwarded = forwardDns(socket, upstreamDns, request.dnsPayload)
+                        if (forwarded != null) {
+                            dnsQueriesForwarded.incrementAndGet()
+                            recordDnsActivity(
+                                DnsActivity(
+                                    timestamp = System.currentTimeMillis(),
+                                    sourceLabel = sourceLabel,
+                                    sourcePackage = sourcePackage,
+                                    domain = request.domain,
+                                    category = null,
+                                    provider = null,
+                                    blockedByTrackerShield = false
+                                )
+                            )
+                        } else {
+                            dnsFailures.incrementAndGet()
+                        }
+                        forwarded
+                    }
+
+                    if (dnsResponse != null) {
+                        val responsePacket = DnsPacketCodec.buildIpv4UdpResponse(request, dnsResponse)
+                        synchronized(output) {
+                            output.write(responsePacket)
+                            output.flush()
+                        }
+                    }
+                }
+            } catch (_: Throwable) {
+                // Shutdown closes the TUN and DNS socket, interrupting reads/receives.
+            } finally {
+                if (packetInput === input) packetInput = null
+                if (packetOutput === output) packetOutput = null
+                if (dnsSocket === socket) dnsSocket = null
+                runCatching { input.close() }
+                runCatching { output.close() }
+                runCatching { socket.close() }
+            }
+        }, "guardian-tracker-dns").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    private fun forwardDns(socket: DatagramSocket, upstreamDns: InetAddress, query: ByteArray): ByteArray? {
+        return try {
+            socket.send(DatagramPacket(query, query.size, upstreamDns, 53))
+            val buffer = ByteArray(4096)
+            val response = DatagramPacket(buffer, buffer.size)
+            socket.receive(response)
+            if (response.length < 12) return null
+            if (query.size >= 2 &&
+                (buffer[0] != query[0] || buffer[1] != query[1])) return null
+            buffer.copyOf(response.length)
+        } catch (_: SocketTimeoutException) {
+            null
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    private fun recordBlockingDnsAttempt(query: DnsQueryInspector.Query) {
+        val sourcePackage = activeVpnPackages.singleOrNull()
+        val sourceLabel = when {
+            mode == Mode.LOCKDOWN -> "Blocked device traffic"
+            sourcePackage != null -> "${appLabel(sourcePackage)} ($sourcePackage)"
+            activeVpnPackages.isNotEmpty() -> "One of ${activeVpnPackages.size} blocked apps"
+            else -> "Blocked traffic"
+        }
         val classification = TrackerDomainClassifier.classify(query.domain)
+
+        recordDnsActivity(
+            DnsActivity(
+                timestamp = System.currentTimeMillis(),
+                sourceLabel = sourceLabel,
+                sourcePackage = sourcePackage,
+                domain = query.domain,
+                category = classification?.category,
+                provider = classification?.provider,
+                blockedByTrackerShield = false
+            )
+        )
+
+        val shouldLog = rememberDomainForTimeline(query.domain)
+        if (!shouldLog) return
 
         if (classification != null) {
             GuardianEventStore.append(
                 this,
                 "REVIEW",
                 "${classification.category} service observed",
-                "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian's local intelligence matches ${classification.provider} (${classification.matchedDomain}), ${classification.explanation}. The packet was already blocked by your app rule. This is a privacy/telemetry signal, not a malware verdict."
+                "$sourceLabel requested ${query.domain} over plaintext DNS/${query.transport}. Guardian's local intelligence matches ${classification.provider} (${classification.matchedDomain}), ${classification.explanation}. The packet was already blocked by your app rule. This is a privacy/telemetry signal, not a malware verdict."
             )
         } else {
             GuardianEventStore.append(
                 this,
                 "INFO",
                 "Blocked DNS request",
-                "$source requested ${query.domain} over plaintext DNS/${query.transport}. Guardian blocked the packet. Cached lookups and encrypted DNS such as DoH/DoT may not be visible here."
+                "$sourceLabel requested ${query.domain} over plaintext DNS/${query.transport}. Guardian blocked the packet. Cached lookups and encrypted DNS such as DoH/DoT may not be visible here."
             )
         }
     }
 
-    private fun blockedTrafficSourceDescription(): String {
-        if (mode == Mode.LOCKDOWN) return "Blocked device traffic"
+    private fun recordTrackerShieldDns(
+        domain: String,
+        classification: TrackerDomainClassifier.Classification,
+        sourcePackage: String?,
+        sourceLabel: String
+    ) {
+        recordDnsActivity(
+            DnsActivity(
+                timestamp = System.currentTimeMillis(),
+                sourceLabel = sourceLabel,
+                sourcePackage = sourcePackage,
+                domain = domain,
+                category = classification.category,
+                provider = classification.provider,
+                blockedByTrackerShield = true
+            )
+        )
 
-        val packages = activeBlockedPackages
-        if (packages.size != 1) {
-            return if (packages.isEmpty()) {
-                "Blocked traffic"
-            } else {
-                "One of ${packages.size} blocked apps"
+        if (!rememberDomainForTimeline(domain)) return
+        val source = sourcePackage?.let { "$sourceLabel ($it)" } ?: sourceLabel
+        GuardianEventStore.append(
+            this,
+            "REVIEW",
+            "Tracker request blocked",
+            "$source requested $domain. Guardian matched ${classification.provider} / ${classification.category} and returned a local DNS block response while leaving the app's other traffic online. This is a privacy classification, not a malware verdict."
+        )
+    }
+
+    private fun rememberDomainForTimeline(domain: String): Boolean = synchronized(domainLogLock) {
+        if (sessionLoggedDomains.contains(domain)) {
+            false
+        } else {
+            if (sessionLoggedDomains.size >= 30) {
+                sessionLoggedDomains.firstOrNull()?.let { sessionLoggedDomains.remove(it) }
             }
+            sessionLoggedDomains.add(domain)
+            true
         }
+    }
 
-        val blockedPackage = packages.single()
-        val label = runCatching {
-            val info = packageManager.getApplicationInfo(blockedPackage, 0)
-            packageManager.getApplicationLabel(info).toString()
-        }.getOrDefault(blockedPackage)
-        return "$label ($blockedPackage)"
+    private fun resolveUpstreamDns(): InetAddress {
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val fromNetwork = runCatching {
+            val network = connectivity.activeNetwork ?: return@runCatching null
+            connectivity.getLinkProperties(network)
+                ?.dnsServers
+                ?.firstOrNull { it is Inet4Address && it.hostAddress != VIRTUAL_DNS }
+        }.getOrNull()
+        return fromNetwork ?: InetAddress.getByName("1.1.1.1")
     }
 
     @Synchronized
@@ -390,28 +679,45 @@ class GuardianVpnService : VpnService() {
         packetInput = null
         runCatching { input?.close() }
 
+        val output = packetOutput
+        packetOutput = null
+        runCatching { output?.close() }
+
+        val socket = dnsSocket
+        dnsSocket = null
+        runCatching { socket?.close() }
+
         val tun = vpnInterface
         vpnInterface = null
         runCatching { tun?.close() }
 
         drainThread?.interrupt()
         drainThread = null
-        activeBlockedPackages = emptyList()
+        activeVpnPackages = emptyList()
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
         stopForeground(STOP_FOREGROUND_REMOVE)
 
         if (logEvent && wasActive) {
             val snapshot = trafficSnapshot()
-            GuardianEventStore.append(
-                this,
-                "INFO",
-                if (previousMode == Mode.LOCKDOWN) "Lock Down stopped" else "Firewall stopped",
-                "Guardian restored Android networking after dropping ${snapshot.packets} packet(s) / ${snapshot.bytes} byte(s) in this session."
-            )
+            when (previousMode) {
+                Mode.TRACKER_SHIELD -> GuardianEventStore.append(
+                    this,
+                    "INFO",
+                    "Tracker Shield stopped",
+                    "Guardian restored normal DNS handling after blocking ${snapshot.trackerQueriesBlocked} tracker request(s), forwarding ${snapshot.dnsQueriesForwarded}, and recording ${snapshot.dnsFailures} DNS failure(s)."
+                )
+                Mode.LOCKDOWN, Mode.FIREWALL -> GuardianEventStore.append(
+                    this,
+                    "INFO",
+                    if (previousMode == Mode.LOCKDOWN) "Lock Down stopped" else "Firewall stopped",
+                    "Guardian restored Android networking after dropping ${snapshot.packets} packet(s) / ${snapshot.bytes} byte(s) in this session."
+                )
+                Mode.OFF -> Unit
+            }
         }
     }
 
-    private fun startForegroundCompat(targetMode: Mode, blockedCount: Int) {
+    private fun startForegroundCompat(targetMode: Mode, appCount: Int) {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -425,16 +731,23 @@ class GuardianVpnService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val title = when (targetMode) {
+            Mode.LOCKDOWN -> "Guardian Lock Down is active"
+            Mode.FIREWALL -> "Guardian Firewall is active"
+            Mode.TRACKER_SHIELD -> "Guardian Tracker Shield is active"
+            Mode.OFF -> "Guardian"
+        }
+        val body = when (targetMode) {
+            Mode.LOCKDOWN -> "Device network traffic is blocked until you stop Lock Down."
+            Mode.FIREWALL -> "Blocking network access for $appCount selected app(s)."
+            Mode.TRACKER_SHIELD -> "Filtering visible DNS trackers for $appCount selected app(s) while normal traffic stays online."
+            Mode.OFF -> "Guardian network protection."
+        }
+
         val notification = NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_guardian)
-            .setContentTitle(
-                if (targetMode == Mode.LOCKDOWN) "Guardian Lock Down is active"
-                else "Guardian Firewall is active"
-            )
-            .setContentText(
-                if (targetMode == Mode.LOCKDOWN) "Device network traffic is blocked until you stop Lock Down."
-                else "Blocking network access for $blockedCount selected app(s)."
-            )
+            .setContentTitle(title)
+            .setContentText(body)
             .setContentIntent(openApp)
             .setOngoing(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

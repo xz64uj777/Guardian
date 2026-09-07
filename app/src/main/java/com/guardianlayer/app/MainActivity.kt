@@ -25,6 +25,7 @@ import com.guardianlayer.app.firewall.FirewallApp
 import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
 import com.guardianlayer.app.firewall.LauncherAppCatalog
+import com.guardianlayer.app.firewall.TrackerShieldRuleStore
 import com.guardianlayer.app.privacy.InstalledAppRiskAnalyzer
 import java.text.DateFormat
 import java.util.Date
@@ -36,7 +37,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var privacyView: TextView
     private lateinit var lockdownButton: MaterialButton
     private lateinit var firewallButton: MaterialButton
+    private lateinit var trackerShieldButton: MaterialButton
     private lateinit var firewallStatusView: TextView
+    private lateinit var trackerShieldStatusView: TextView
     private lateinit var firewallActivityView: TextView
     private lateinit var firewallApps: LinearLayout
     private lateinit var timeline: LinearLayout
@@ -47,6 +50,8 @@ class MainActivity : AppCompatActivity() {
     private val expandedAppPackages = mutableSetOf<String>()
     private val appTrafficViews = mutableMapOf<String, TextView>()
     private val appTrafficHints = mutableMapOf<String, TextView>()
+    private val appBlockButtons = mutableMapOf<String, MaterialButton>()
+    private val appShieldButtons = mutableMapOf<String, MaterialButton>()
     private val appCatalogByPackage = mutableMapOf<String, FirewallApp>()
 
     private val trafficTicker = object : Runnable {
@@ -151,19 +156,8 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(emergencyButton.withTop(dp(10)))
 
-        root.addView(
-            text(
-                "SMART FIREWALL",
-                13f,
-                Color.rgb(168, 173, 183),
-                Typeface.BOLD
-            ).withTop(dp(28))
-        )
-
-        firewallStatusView = text("Loading apps…", 15f, Color.WHITE, Typeface.NORMAL).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(Color.rgb(27, 30, 37), 16f)
-        }
+        root.addView(sectionLabel("SMART FIREWALL").withTop(dp(28)))
+        firewallStatusView = cardText("Loading apps…")
         root.addView(firewallStatusView.withTop(dp(8)))
 
         firewallButton = MaterialButton(this).apply {
@@ -174,33 +168,25 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(firewallButton.withTop(dp(10)))
 
-        root.addView(
-            text(
-                "FIREWALL ACTIVITY",
-                13f,
-                Color.rgb(168, 173, 183),
-                Typeface.BOLD
-            ).withTop(dp(22))
+        root.addView(sectionLabel("TRACKER SHIELD · DNS FILTERING").withTop(dp(22)))
+        trackerShieldStatusView = cardText(
+            "Mark one or more apps SHIELDED below. Tracker Shield keeps normal app traffic online and filters ordinary DNS requests that match Guardian's local tracker intelligence."
         )
-        firewallActivityView = text(
-            "No blocked traffic recorded yet.",
-            14f,
-            Color.WHITE,
-            Typeface.NORMAL
-        ).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(Color.rgb(27, 30, 37), 16f)
+        root.addView(trackerShieldStatusView.withTop(dp(8)))
+
+        trackerShieldButton = MaterialButton(this).apply {
+            text = "START TRACKER SHIELD"
+            textSize = 15f
+            minHeight = dp(52)
+            setOnClickListener { toggleTrackerShield() }
         }
+        root.addView(trackerShieldButton.withTop(dp(10)))
+
+        root.addView(sectionLabel("NETWORK ACTIVITY").withTop(dp(22)))
+        firewallActivityView = cardText("No Guardian network session recorded yet.")
         root.addView(firewallActivityView.withTop(dp(8)))
 
-        root.addView(
-            text(
-                "APP RULES · TAP AN APP FOR TRAFFIC",
-                13f,
-                Color.rgb(168, 173, 183),
-                Typeface.BOLD
-            ).withTop(dp(22))
-        )
+        root.addView(sectionLabel("APP RULES · TAP AN APP FOR TRAFFIC").withTop(dp(22)))
         firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(firewallApps.withTop(dp(8)))
 
@@ -212,33 +198,13 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(privacyButton.withTop(dp(18)))
 
-        root.addView(
-            text(
-                "PRIVACY SNAPSHOT",
-                13f,
-                Color.rgb(168, 173, 183),
-                Typeface.BOLD
-            ).withTop(dp(28))
+        root.addView(sectionLabel("PRIVACY SNAPSHOT").withTop(dp(28)))
+        privacyView = cardText(
+            "No snapshot yet. Guardian will review visible launcher apps and explain sensitive permissions that are currently granted."
         )
-        privacyView = text(
-            "No snapshot yet. Guardian will review visible launcher apps and explain sensitive permissions that are currently granted.",
-            15f,
-            Color.WHITE,
-            Typeface.NORMAL
-        ).apply {
-            setPadding(dp(16), dp(16), dp(16), dp(16))
-            background = rounded(Color.rgb(27, 30, 37), 16f)
-        }
         root.addView(privacyView.withTop(dp(8)))
 
-        root.addView(
-            text(
-                "GUARDIAN TIMELINE",
-                13f,
-                Color.rgb(168, 173, 183),
-                Typeface.BOLD
-            ).withTop(dp(28))
-        )
+        root.addView(sectionLabel("GUARDIAN TIMELINE").withTop(dp(28)))
         timeline = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(timeline.withTop(dp(8)))
         return scroll
@@ -257,15 +223,24 @@ class MainActivity : AppCompatActivity() {
             stopGuardianVpn()
             return
         }
-
-        val blockedCount = FirewallRuleStore.blockedCount(this)
-        if (blockedCount == 0) {
-            firewallStatusView.text =
-                "Choose at least one app and tap BLOCK before starting the firewall."
+        if (FirewallRuleStore.blockedCount(this) == 0) {
+            firewallStatusView.text = "Choose at least one app and tap BLOCK before starting the firewall."
             return
         }
-
         requestVpnStart(GuardianVpnService.ACTION_FIREWALL)
+    }
+
+    private fun toggleTrackerShield() {
+        if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            stopGuardianVpn()
+            return
+        }
+        if (TrackerShieldRuleStore.protectedCount(this) == 0) {
+            trackerShieldStatusView.text =
+                "Choose at least one app and tap SHIELD before starting Tracker Shield."
+            return
+        }
+        requestVpnStart(GuardianVpnService.ACTION_TRACKER_SHIELD)
     }
 
     private fun requestVpnStart(action: String) {
@@ -276,14 +251,17 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startGuardianVpn(action: String) {
-        val intent = Intent(this, GuardianVpnService::class.java).setAction(action)
-        ContextCompat.startForegroundService(this, intent)
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, GuardianVpnService::class.java).setAction(action)
+        )
         uiHandler.postDelayed({ refresh() }, 450)
     }
 
     private fun stopGuardianVpn() {
         lockdownButton.isEnabled = false
         firewallButton.isEnabled = false
+        trackerShieldButton.isEnabled = false
         GuardianStateStore.setLockdownActive(this, false)
 
         runCatching {
@@ -297,6 +275,7 @@ class MainActivity : AppCompatActivity() {
             runCatching { stopService(Intent(this, GuardianVpnService::class.java)) }
             lockdownButton.isEnabled = true
             firewallButton.isEnabled = true
+            trackerShieldButton.isEnabled = true
             refresh()
         }, 500)
     }
@@ -326,15 +305,12 @@ class MainActivity : AppCompatActivity() {
         firewallApps.removeAllViews()
         appTrafficViews.clear()
         appTrafficHints.clear()
+        appBlockButtons.clear()
+        appShieldButtons.clear()
         appCatalogByPackage.clear()
 
         firewallApps.addView(
-            text(
-                "Loading visible apps…",
-                14f,
-                Color.rgb(168, 173, 183),
-                Typeface.NORMAL
-            )
+            text("Loading visible apps…", 14f, Color.rgb(168, 173, 183), Typeface.NORMAL)
         )
 
         Thread {
@@ -356,17 +332,15 @@ class MainActivity : AppCompatActivity() {
                         firewallApps.addView(buildFirewallRow(app).withTop(dp(6)))
                     }
                 }
-                refreshFirewallSummary()
+                refreshRuleButtons()
+                refreshSummaries()
                 refreshExpandedAppTraffic()
             }
         }.start()
     }
 
     private fun buildFirewallRow(app: FirewallApp): View {
-        val container = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-        }
-
+        val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         val row = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -396,48 +370,23 @@ class MainActivity : AppCompatActivity() {
             )
             addView(trafficHint)
         }
-        row.addView(
-            labels,
-            LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        )
+        row.addView(labels, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
 
-        val ruleButton = MaterialButton(this).apply {
-            minWidth = 0
-            minimumWidth = 0
-            textSize = 12f
-            updateRuleButton(this, app.packageName)
-            setOnClickListener {
-                val nowBlocked = !FirewallRuleStore.isBlocked(
-                    this@MainActivity,
-                    app.packageName
-                )
-                FirewallRuleStore.setBlocked(
-                    this@MainActivity,
-                    app.packageName,
-                    nowBlocked
-                )
-                updateRuleButton(this, app.packageName)
-                GuardianEventStore.append(
-                    this@MainActivity,
-                    "INFO",
-                    if (nowBlocked) "App blocked" else "App allowed",
-                    "${app.label} (${app.packageName}) ${if (nowBlocked) "will be routed into Guardian's blocking VPN" else "will use Android's normal network route"}."
-                )
-                refreshFirewallSummary()
-                refreshTimeline()
-                refreshExpandedAppTraffic()
-
-                if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.FIREWALL) {
-                    startService(
-                        Intent(this@MainActivity, GuardianVpnService::class.java)
-                            .setAction(GuardianVpnService.ACTION_FIREWALL)
-                    )
-                    uiHandler.postDelayed({ refresh() }, 350)
-                }
-            }
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
         }
+
+        val blockButton = smallRuleButton().apply {
+            setOnClickListener { toggleBlockRule(app) }
+        }
+        val shieldButton = smallRuleButton().apply {
+            setOnClickListener { toggleShieldRule(app) }
+        }
+        controls.addView(blockButton)
+        controls.addView(shieldButton.withTop(dp(4)))
         row.addView(
-            ruleButton,
+            controls,
             LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
@@ -447,24 +396,88 @@ class MainActivity : AppCompatActivity() {
         val trafficView = text("", 13f, Color.rgb(220, 222, 228), Typeface.NORMAL).apply {
             setPadding(dp(14), dp(12), dp(14), dp(14))
             background = rounded(Color.rgb(22, 24, 30), 12f)
-            visibility = if (expandedAppPackages.contains(app.packageName)) {
-                View.VISIBLE
-            } else {
-                View.GONE
-            }
+            visibility = if (expandedAppPackages.contains(app.packageName)) View.VISIBLE else View.GONE
         }
 
-        labels.setOnClickListener {
-            toggleAppTraffic(app.packageName)
-        }
-
+        labels.setOnClickListener { toggleAppTraffic(app.packageName) }
         appTrafficViews[app.packageName] = trafficView
         appTrafficHints[app.packageName] = trafficHint
+        appBlockButtons[app.packageName] = blockButton
+        appShieldButtons[app.packageName] = shieldButton
 
         container.addView(row)
         container.addView(trafficView.withTop(dp(4)))
         if (trafficView.visibility == View.VISIBLE) refreshAppTraffic(app, trafficView)
         return container
+    }
+
+    private fun smallRuleButton() = MaterialButton(this).apply {
+        minWidth = 0
+        minimumWidth = 0
+        minHeight = dp(36)
+        textSize = 11f
+    }
+
+    private fun toggleBlockRule(app: FirewallApp) {
+        val nowBlocked = !FirewallRuleStore.isBlocked(this, app.packageName)
+        FirewallRuleStore.setBlocked(this, app.packageName, nowBlocked)
+        if (nowBlocked) TrackerShieldRuleStore.setProtected(this, app.packageName, false)
+
+        GuardianEventStore.append(
+            this,
+            "INFO",
+            if (nowBlocked) "App blocked" else "App allowed",
+            "${app.label} (${app.packageName}) ${if (nowBlocked) "will be routed into Guardian's blocking VPN" else "will no longer be blocked by Smart Firewall"}."
+        )
+
+        refreshRuleButtons()
+        refreshSummaries()
+        refreshTimeline()
+        refreshExpandedAppTraffic()
+        applyLiveRuleChanges()
+    }
+
+    private fun toggleShieldRule(app: FirewallApp) {
+        val nowShielded = !TrackerShieldRuleStore.isProtected(this, app.packageName)
+        TrackerShieldRuleStore.setProtected(this, app.packageName, nowShielded)
+        if (nowShielded) FirewallRuleStore.setBlocked(this, app.packageName, false)
+
+        GuardianEventStore.append(
+            this,
+            "INFO",
+            if (nowShielded) "Tracker Shield enabled for app" else "Tracker Shield disabled for app",
+            "${app.label} (${app.packageName}) ${if (nowShielded) "will use Guardian's DNS tracker filter while normal app traffic remains online" else "will use Android's normal DNS path when Tracker Shield is not applied"}."
+        )
+
+        refreshRuleButtons()
+        refreshSummaries()
+        refreshTimeline()
+        refreshExpandedAppTraffic()
+        applyLiveRuleChanges()
+    }
+
+    private fun applyLiveRuleChanges() {
+        when (GuardianVpnService.currentMode()) {
+            GuardianVpnService.Mode.FIREWALL -> startService(
+                Intent(this, GuardianVpnService::class.java)
+                    .setAction(GuardianVpnService.ACTION_FIREWALL)
+            )
+            GuardianVpnService.Mode.TRACKER_SHIELD -> startService(
+                Intent(this, GuardianVpnService::class.java)
+                    .setAction(GuardianVpnService.ACTION_TRACKER_SHIELD)
+            )
+            else -> Unit
+        }
+        uiHandler.postDelayed({ refresh() }, 350)
+    }
+
+    private fun refreshRuleButtons() {
+        appCatalogByPackage.keys.forEach { packageName ->
+            val blocked = FirewallRuleStore.isBlocked(this, packageName)
+            val shielded = TrackerShieldRuleStore.isProtected(this, packageName)
+            appBlockButtons[packageName]?.text = if (blocked) "ALLOW" else "BLOCK"
+            appShieldButtons[packageName]?.text = if (shielded) "UNSHIELD" else "SHIELD"
+        }
     }
 
     private fun toggleAppTraffic(packageName: String) {
@@ -497,13 +510,13 @@ class MainActivity : AppCompatActivity() {
         val snapshot = GuardianVpnService.trafficSnapshot()
         val mode = GuardianVpnService.currentMode()
         val blockedPackages = FirewallRuleStore.blockedPackages(this)
+        val shieldedPackages = TrackerShieldRuleStore.protectedPackages(this)
         val isBlocked = blockedPackages.contains(app.packageName)
-        val exactLive = mode == GuardianVpnService.Mode.FIREWALL &&
-            blockedPackages.size == 1 && isBlocked
-        val appPrefix = "${app.label} → "
-        val recentForApp = snapshot.recent.filter { it.protocol.startsWith(appPrefix) }
-        val exactLastSession = mode == GuardianVpnService.Mode.OFF && recentForApp.isNotEmpty()
+        val isShielded = shieldedPackages.contains(app.packageName)
 
+        val appPrefix = "${app.label} → "
+        val blockedEndpoints = snapshot.recent.filter { it.protocol.startsWith(appPrefix) }
+        val appDns = snapshot.recentDns.filter { it.sourcePackage == app.packageName }
         val exactEvents = GuardianEventStore.recent(this, 100)
             .filter { event -> event.detail.contains("(${app.packageName})") }
             .take(4)
@@ -517,91 +530,183 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        if (mode == GuardianVpnService.Mode.FIREWALL && isBlocked && blockedPackages.size > 1) {
-            view.text = buildString {
-                append("BLOCKED · SHARED ATTRIBUTION\n\n")
-                append("${blockedPackages.size} apps are currently sharing Guardian's blocking VPN. Guardian will not guess which individual packets belong to ${app.label}.\n\n")
-                append("For exact live traffic here, temporarily leave only ${app.label} blocked.")
-                appendAppSignals(exactEvents)
+        if (mode == GuardianVpnService.Mode.FIREWALL && isBlocked) {
+            if (blockedPackages.size > 1) {
+                view.text = buildString {
+                    append("BLOCKED · SHARED ATTRIBUTION\n\n")
+                    append("${blockedPackages.size} apps are sharing Guardian's blocking VPN. Guardian will not guess which individual packets belong to ${app.label}.\n\n")
+                    append("For exact traffic here, temporarily leave only ${app.label} blocked.")
+                    appendAppSignals(exactEvents)
+                }
+            } else {
+                val endpoints = if (blockedEndpoints.isEmpty()) {
+                    "No destination metadata parsed yet."
+                } else {
+                    blockedEndpoints.take(5).joinToString("\n") { drop ->
+                        "• ${drop.protocol.removePrefix(appPrefix)} ${formatEndpoint(drop.destination, drop.port)}"
+                    }
+                }
+                view.text = buildString {
+                    append("BLOCKED · EXACT LIVE TRAFFIC\n\n")
+                    append("${snapshot.packets} packets · ${formatBytes(snapshot.bytes)} dropped")
+                    append("\nTCP ${snapshot.tcpPackets} · UDP ${snapshot.udpPackets} · Other ${snapshot.otherPackets}")
+                    append("\n\nRecent destinations\n")
+                    append(endpoints)
+                    appendDnsActivity(appDns)
+                    appendAppSignals(exactEvents)
+                    append("\n\nExact because this is the only app routed into Smart Firewall.")
+                }
             }
             return
         }
 
-        if (exactLive || exactLastSession) {
-            val heading = if (exactLive) {
-                "BLOCKED · EXACT LIVE TRAFFIC"
+        if (mode == GuardianVpnService.Mode.TRACKER_SHIELD && isShielded) {
+            if (shieldedPackages.size > 1) {
+                view.text = buildString {
+                    append("SHIELDED · SHARED DNS ATTRIBUTION\n\n")
+                    append("${shieldedPackages.size} apps are sharing Tracker Shield. Guardian is blocking matched tracker DNS requests, but will not guess which app made each query.\n\n")
+                    append("Leave only ${app.label} shielded for exact per-app DNS activity.")
+                    appendAppSignals(exactEvents)
+                }
             } else {
-                "LAST EXACT BLOCKED SESSION"
-            }
-            val endpoints = if (recentForApp.isEmpty()) {
-                "No destination metadata parsed yet."
-            } else {
-                recentForApp.take(5).joinToString("\n") { drop ->
-                    val protocol = drop.protocol.removePrefix(appPrefix)
-                    "• $protocol ${formatEndpoint(drop.destination, drop.port)}"
+                val blocked = appDns.count { it.blockedByTrackerShield }
+                val allowed = appDns.count { !it.blockedByTrackerShield }
+                view.text = buildString {
+                    append("SHIELDED · EXACT LIVE DNS\n\n")
+                    append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
+                    append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} failures")
+                    append("\nVisible here: $blocked blocked · $allowed allowed recent entries")
+                    appendDnsActivity(appDns)
+                    appendAppSignals(exactEvents)
+                    append("\n\nNormal app traffic bypasses Guardian and stays online. This first shield only filters ordinary IPv4/UDP DNS; cached IPs and encrypted DNS can bypass it.")
                 }
             }
+            return
+        }
 
+        val lastExactBlocked = mode == GuardianVpnService.Mode.OFF && blockedEndpoints.isNotEmpty()
+        val lastExactShield = mode == GuardianVpnService.Mode.OFF && appDns.isNotEmpty()
+        if (lastExactBlocked || lastExactShield) {
             view.text = buildString {
-                append(heading)
-                append("\n\n")
-                append("${snapshot.packets} packets · ${formatBytes(snapshot.bytes)} dropped")
-                append("\nTCP ${snapshot.tcpPackets} · UDP ${snapshot.udpPackets} · Other ${snapshot.otherPackets}")
-                append("\n\nRecent destinations\n")
-                append(endpoints)
+                append("LAST EXACT GUARDIAN SESSION\n")
+                if (lastExactBlocked) {
+                    append("\nBlocked traffic\n")
+                    blockedEndpoints.take(5).forEach { drop ->
+                        append("• ${drop.protocol.removePrefix(appPrefix)} ${formatEndpoint(drop.destination, drop.port)}\n")
+                    }
+                }
+                if (lastExactShield) appendDnsActivity(appDns)
                 appendAppSignals(exactEvents)
-                append("\n\nGuardian can make this exact attribution because this app was the only app routed into the selective firewall session.")
             }
             return
         }
 
         view.text = buildString {
-            if (isBlocked) {
-                append("BLOCKED · WAITING FOR FIREWALL\n\n")
-                append("Start Smart Firewall, then use ${app.label}. If it is the only blocked app, Guardian will show its exact dropped traffic here.")
-            } else {
-                append("ALLOWED · NOT CAPTURED\n\n")
-                append("Guardian's current selective firewall lets allowed apps bypass its VPN, so it does not capture this app's normal Internet traffic yet.")
+            when {
+                isBlocked -> {
+                    append("BLOCKED · WAITING FOR FIREWALL\n\n")
+                    append("Start Smart Firewall, then use ${app.label}. If it is the only blocked app, Guardian will show exact dropped traffic here.")
+                }
+                isShielded -> {
+                    append("SHIELDED · WAITING FOR TRACKER SHIELD\n\n")
+                    append("Start Tracker Shield, then use ${app.label}. The app should remain online while matched plaintext-DNS tracker requests are blocked.")
+                }
+                else -> {
+                    append("ALLOWED · NOT CAPTURED\n\n")
+                    append("This app currently bypasses Guardian's VPN modes. Tap BLOCK for a full network block or SHIELD for DNS-level tracker filtering.")
+                }
             }
             appendAppSignals(exactEvents)
         }
     }
 
-    private fun StringBuilder.appendAppSignals(events: List<com.guardianlayer.app.model.GuardianEvent>) {
+    private fun StringBuilder.appendDnsActivity(entries: List<GuardianVpnService.DnsActivity>) {
+        if (entries.isEmpty()) return
+        append("\n\nRecent DNS activity\n")
+        entries.take(6).forEach { entry ->
+            if (entry.blockedByTrackerShield) {
+                append("• BLOCKED")
+                if (!entry.category.isNullOrBlank()) append(" ${entry.category}")
+                append(" · ${entry.domain}")
+                if (!entry.provider.isNullOrBlank()) append(" · ${entry.provider}")
+                append("\n")
+            } else {
+                append("• ALLOWED · ${entry.domain}\n")
+            }
+        }
+    }
+
+    private fun StringBuilder.appendAppSignals(
+        events: List<com.guardianlayer.app.model.GuardianEvent>
+    ) {
         if (events.isEmpty()) return
-        append("\n\nRecent visible DNS / privacy signals\n")
+        append("\n\nRecent privacy signals\n")
         events.forEach { event ->
-            val domain = Regex("requested ([^\\s]+) over")
+            val requestedDomain = Regex("requested ([^\\s.]+(?:\\.[^\\s.]+)+)")
                 .find(event.detail)
                 ?.groupValues
                 ?.getOrNull(1)
             append("• ${event.title}")
-            if (!domain.isNullOrBlank()) append(": $domain")
+            if (!requestedDomain.isNullOrBlank()) append(": $requestedDomain")
             append("\n")
         }
     }
 
-    private fun updateRuleButton(button: MaterialButton, packageName: String) {
-        val blocked = FirewallRuleStore.isBlocked(this, packageName)
-        button.text = if (blocked) "ALLOW" else "BLOCK"
-    }
-
-    private fun refreshFirewallSummary() {
-        val count = FirewallRuleStore.blockedCount(this)
+    private fun refreshSummaries() {
+        val blocked = FirewallRuleStore.blockedCount(this)
+        val shielded = TrackerShieldRuleStore.protectedCount(this)
         val mode = GuardianVpnService.currentMode()
+
         firewallStatusView.text = when {
             mode == GuardianVpnService.Mode.FIREWALL ->
-                "FIREWALL ACTIVE · $count app(s) blocked\n\nOnly selected apps are routed into Guardian's blocking VPN. Other apps stay online. Rule changes apply immediately."
-            count > 0 ->
-                "$count app(s) marked BLOCKED\n\nStart Firewall to enforce these rules. Guardian only inspects metadata for traffic it is already blocking."
+                "FIREWALL ACTIVE · $blocked app(s) blocked\n\nOnly BLOCK rules are routed into Guardian's blackhole VPN. Other apps stay online."
+            blocked > 0 ->
+                "$blocked app(s) marked BLOCKED\n\nStart Firewall to enforce full network blocking."
             else ->
-                "No apps blocked yet. Tap BLOCK beside an app, then start the firewall."
+                "No apps blocked. BLOCK is the hard rule: all network traffic from selected apps is stopped."
+        }
+
+        trackerShieldStatusView.text = when {
+            mode == GuardianVpnService.Mode.TRACKER_SHIELD ->
+                "TRACKER SHIELD ACTIVE · $shielded app(s) shielded\n\nNormal traffic stays online. Guardian routes ordinary DNS through a local filter and blocks domains matched by its offline tracker intelligence."
+            shielded > 0 ->
+                "$shielded app(s) marked SHIELDED\n\nStart Tracker Shield to filter visible tracker DNS while leaving the apps online."
+            else ->
+                "No apps shielded. Tap SHIELD beside an app to enable DNS-level tracker filtering for it."
         }
     }
 
     private fun refreshTrafficActivity() {
         val snapshot = GuardianVpnService.trafficSnapshot()
         val mode = GuardianVpnService.currentMode()
+        val displayMode = if (mode == GuardianVpnService.Mode.OFF) snapshot.sessionMode else mode
+
+        if (displayMode == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            val heading = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
+                "LIVE TRACKER SHIELD"
+            } else {
+                "LAST TRACKER SHIELD SESSION"
+            }
+            val recent = if (snapshot.recentDns.isEmpty()) {
+                "No ordinary DNS activity recorded yet."
+            } else {
+                snapshot.recentDns.take(7).joinToString("\n") { entry ->
+                    val prefix = if (entry.blockedByTrackerShield) "BLOCKED" else "ALLOWED"
+                    val category = entry.category?.let { " · $it" } ?: ""
+                    "• $prefix$category · ${entry.domain} · ${entry.sourceLabel}"
+                }
+            }
+            firewallActivityView.text = buildString {
+                append(heading)
+                append("\n\n")
+                append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
+                append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} failures")
+                append("\n\nRecent DNS decisions\n")
+                append(recent)
+                append("\n\nTracker Shield is intentionally DNS-only in this alpha. It does not decrypt HTTPS or encrypted DNS and does not claim to block cached/direct-IP tracker traffic.")
+            }
+            return
+        }
 
         if (snapshot.packets == 0L) {
             firewallActivityView.text = when (mode) {
@@ -609,31 +714,26 @@ class MainActivity : AppCompatActivity() {
                     "LIVE SMART FIREWALL\n\nNo blocked packets have reached Guardian yet. Open a blocked app to generate activity."
                 GuardianVpnService.Mode.LOCKDOWN ->
                     "LIVE LOCK DOWN\n\nNo dropped packets recorded yet."
-                GuardianVpnService.Mode.OFF ->
-                    "No blocked traffic recorded yet. Start Smart Firewall or Lock Down to collect local drop statistics."
+                else -> "No blocked traffic recorded in the last Guardian firewall session."
             }
             return
         }
 
-        val heading = when (mode) {
-            GuardianVpnService.Mode.FIREWALL -> "LIVE SMART FIREWALL"
-            GuardianVpnService.Mode.LOCKDOWN -> "LIVE LOCK DOWN"
-            GuardianVpnService.Mode.OFF -> "LAST FIREWALL SESSION"
+        val heading = when (displayMode) {
+            GuardianVpnService.Mode.FIREWALL -> if (mode == GuardianVpnService.Mode.FIREWALL) "LIVE SMART FIREWALL" else "LAST FIREWALL SESSION"
+            GuardianVpnService.Mode.LOCKDOWN -> if (mode == GuardianVpnService.Mode.LOCKDOWN) "LIVE LOCK DOWN" else "LAST LOCK DOWN SESSION"
+            else -> "LAST NETWORK SESSION"
         }
 
         val lastActivity = if (snapshot.lastActivityAt > 0) {
-            DateFormat.getTimeInstance(DateFormat.MEDIUM)
-                .format(Date(snapshot.lastActivityAt))
-        } else {
-            "—"
-        }
+            DateFormat.getTimeInstance(DateFormat.MEDIUM).format(Date(snapshot.lastActivityAt))
+        } else "—"
 
         val recentText = if (snapshot.recent.isEmpty()) {
             "No destination metadata parsed yet."
         } else {
             snapshot.recent.take(6).joinToString("\n") { drop ->
-                val time = DateFormat.getTimeInstance(DateFormat.SHORT)
-                    .format(Date(drop.timestamp))
+                val time = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(drop.timestamp))
                 "• $time · ${drop.protocol} ${formatEndpoint(drop.destination, drop.port)}"
             }
         }
@@ -646,7 +746,7 @@ class MainActivity : AppCompatActivity() {
             append("\nLast blocked traffic: $lastActivity")
             append("\n\nRecent blocked destinations\n")
             append(recentText)
-            append("\n\nWhen one app is selected, Guardian labels its traffic directly. With multiple blocked apps, attribution stays shared rather than guessed. Payloads are not decrypted.")
+            append("\n\nWith one selected app Guardian can label traffic directly. With multiple selected apps attribution remains shared instead of guessed.")
         }
     }
 
@@ -690,7 +790,9 @@ class MainActivity : AppCompatActivity() {
             GuardianVpnService.Mode.LOCKDOWN ->
                 "LOCK DOWN ACTIVE\n\nGuardian is blocking network traffic for the device."
             GuardianVpnService.Mode.FIREWALL ->
-                "FIREWALL ACTIVE\n\n${FirewallRuleStore.blockedCount(this)} selected app(s) are blocked while other apps remain online."
+                "FIREWALL ACTIVE\n\n${FirewallRuleStore.blockedCount(this)} selected app(s) are fully blocked while other apps remain online."
+            GuardianVpnService.Mode.TRACKER_SHIELD ->
+                "TRACKER SHIELD ACTIVE\n\n${TrackerShieldRuleStore.protectedCount(this)} selected app(s) remain online while Guardian filters visible tracker DNS."
             GuardianVpnService.Mode.OFF ->
                 "DEVICE ONLINE\n\nGuardian's VPN protection is not currently active."
         }
@@ -698,6 +800,7 @@ class MainActivity : AppCompatActivity() {
             if (mode == GuardianVpnService.Mode.LOCKDOWN) Color.rgb(255, 160, 160)
             else Color.WHITE
         )
+
         lockdownButton.text = if (mode == GuardianVpnService.Mode.LOCKDOWN) {
             "STOP LOCK DOWN"
         } else {
@@ -708,8 +811,18 @@ class MainActivity : AppCompatActivity() {
         } else {
             "START FIREWALL"
         }
-        firewallButton.isEnabled = mode != GuardianVpnService.Mode.LOCKDOWN
-        refreshFirewallSummary()
+        trackerShieldButton.text = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            "STOP TRACKER SHIELD"
+        } else {
+            "START TRACKER SHIELD"
+        }
+
+        val lockedDown = mode == GuardianVpnService.Mode.LOCKDOWN
+        firewallButton.isEnabled = !lockedDown
+        trackerShieldButton.isEnabled = !lockedDown
+
+        refreshRuleButtons()
+        refreshSummaries()
         refreshTrafficActivity()
         refreshExpandedAppTraffic()
         refreshTimeline()
@@ -775,6 +888,15 @@ class MainActivity : AppCompatActivity() {
         if (port == null) return address
         return if (address.contains(':')) "[$address]:$port" else "$address:$port"
     }
+
+    private fun sectionLabel(value: String) =
+        text(value, 13f, Color.rgb(168, 173, 183), Typeface.BOLD)
+
+    private fun cardText(value: String) =
+        text(value, 14f, Color.WHITE, Typeface.NORMAL).apply {
+            setPadding(dp(16), dp(16), dp(16), dp(16))
+            background = rounded(Color.rgb(27, 30, 37), 16f)
+        }
 
     private fun text(value: String, size: Float, color: Int, style: Int) = TextView(this).apply {
         text = value
