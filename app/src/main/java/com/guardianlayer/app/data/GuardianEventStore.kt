@@ -9,6 +9,7 @@ object GuardianEventStore {
     private const val PREFS = "guardian_events"
     private const val KEY_EVENTS = "events"
     private const val MAX_EVENTS = 100
+    private const val TRACKER_BLOCK_TITLE = "Tracker request blocked"
 
     @Synchronized
     fun append(context: Context, level: String, title: String, detail: String) {
@@ -23,9 +24,22 @@ object GuardianEventStore {
                 .put("detail", detail)
         )
 
-        val keep = minOf(existing.length(), MAX_EVENTS - 1)
-        for (index in 0 until keep) {
-            next.put(existing.getJSONObject(index))
+        var kept = 0
+        for (index in 0 until existing.length()) {
+            if (kept >= MAX_EVENTS - 1) break
+            val item = existing.optJSONObject(index) ?: continue
+
+            // Tracker Shield can see the same blocked hostname repeatedly across
+            // sessions. Keep the newest identical signal instead of filling the
+            // timeline and per-app signal view with duplicate entries. Session
+            // totals remain available in Tracker Shield telemetry/history.
+            val duplicateTrackerSignal = title == TRACKER_BLOCK_TITLE &&
+                item.optString("title") == TRACKER_BLOCK_TITLE &&
+                item.optString("detail") == detail
+            if (duplicateTrackerSignal) continue
+
+            next.put(item)
+            kept++
         }
 
         prefs.edit().putString(KEY_EVENTS, next.toString()).apply()
