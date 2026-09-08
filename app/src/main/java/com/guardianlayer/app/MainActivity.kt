@@ -19,6 +19,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
 import com.guardianlayer.app.data.TrackerActivityStore
@@ -36,9 +37,11 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var statusView: TextView
     private lateinit var privacyView: TextView
+    private lateinit var privacyHistoryView: TextView
     private lateinit var lockdownButton: MaterialButton
     private lateinit var firewallButton: MaterialButton
     private lateinit var trackerShieldButton: MaterialButton
+    private lateinit var clearPrivacyHistoryButton: MaterialButton
     private lateinit var firewallStatusView: TextView
     private lateinit var trackerShieldStatusView: TextView
     private lateinit var firewallActivityView: TextView
@@ -58,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     private val trafficTicker = object : Runnable {
         override fun run() {
             if (::firewallActivityView.isInitialized) refreshTrafficActivity()
+            if (::privacyHistoryView.isInitialized) refreshPrivacyHistorySummary()
             refreshExpandedAppTraffic()
             uiHandler.postDelayed(this, 1000)
         }
@@ -190,6 +194,20 @@ class MainActivity : AppCompatActivity() {
         root.addView(sectionLabel("APP RULES · TAP AN APP FOR TRAFFIC").withTop(dp(22)))
         firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         root.addView(firewallApps.withTop(dp(8)))
+
+        root.addView(sectionLabel("PRIVACY PROFILES · LOCAL HISTORY").withTop(dp(24)))
+        privacyHistoryView = cardText(
+            "No exact per-app privacy history yet. Shield one app at a time to build a trustworthy local profile."
+        )
+        root.addView(privacyHistoryView.withTop(dp(8)))
+
+        clearPrivacyHistoryButton = MaterialButton(this).apply {
+            text = "CLEAR SAVED PRIVACY HISTORY"
+            textSize = 13f
+            minHeight = dp(46)
+            setOnClickListener { confirmClearPrivacyHistory() }
+        }
+        root.addView(clearPrivacyHistoryButton.withTop(dp(8)))
 
         val privacyButton = MaterialButton(this).apply {
             text = "RUN PRIVACY SNAPSHOT"
@@ -335,6 +353,7 @@ class MainActivity : AppCompatActivity() {
                 }
                 refreshRuleButtons()
                 refreshSummaries()
+                refreshPrivacyHistorySummary()
                 refreshExpandedAppTraffic()
             }
         }.start()
@@ -647,32 +666,57 @@ class MainActivity : AppCompatActivity() {
     private fun StringBuilder.appendPrivacyHistory(profile: TrackerActivityStore.AppProfile?) {
         if (profile == null) return
 
-        val lastSeen = DateFormat.getDateTimeInstance(
-            DateFormat.SHORT,
-            DateFormat.SHORT
-        ).format(Date(profile.lastSeenAt))
+        val dateTime = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT)
+        val firstSeen = dateTime.format(Date(profile.firstSeenAt))
+        val lastSeen = dateTime.format(Date(profile.lastSeenAt))
 
-        append("\n\nPRIVACY HISTORY · EXACT ATTRIBUTION\n")
+        append("\n\nPRIVACY PROFILE · EXACT HISTORY\n")
         append("${profile.retainedDecisions} retained DNS decisions · ${profile.blockedDecisions} tracker blocks · ${profile.allowedDecisions} allowed\n")
-        append("${profile.uniqueTrackerDomains} unique tracker domains · Last seen $lastSeen")
+        append("${profile.uniqueTrackerDomains} unique tracker domains\n")
+        append("Observed $firstSeen → $lastSeen")
 
-        if (profile.topTrackers.isNotEmpty()) {
-            append("\n\nTop blocked tracker domains\n")
-            profile.topTrackers.take(5).forEach { tracker ->
-                append("• ${tracker.domain} · ${tracker.provider} · ${tracker.category} · ×${tracker.count}\n")
+        append("\n\nWhat Guardian saw\n")
+        if (profile.blockedDecisions == 0L) {
+            append("No classified tracker domains are present in the retained exact history yet.")
+        } else {
+            append(
+                "Guardian blocked ${profile.blockedDecisions} classified tracker DNS request(s) across " +
+                    "${profile.uniqueTrackerDomains} domain(s) while the app's other traffic stayed online."
+            )
+        }
+
+        if (profile.providers.isNotEmpty()) {
+            append("\n\nTracker companies\n")
+            profile.providers.take(5).forEach { provider ->
+                append("• ${provider.name} · ${provider.count} blocked request(s)\n")
             }
         }
 
         if (profile.categories.isNotEmpty()) {
-            append("\nCategories: ")
-            append(
-                profile.categories.take(4).joinToString(" · ") {
-                    "${it.name} ${it.count}"
-                }
-            )
+            append("\nCategories\n")
+            profile.categories.take(5).forEach { category ->
+                append("• ${category.name} · ${category.count}\n")
+            }
         }
 
-        append("\n\nStored locally on this device from exact single-app Tracker Shield sessions. Guardian keeps a bounded history and does not add ambiguous multi-app DNS to this profile.")
+        if (profile.topTrackers.isNotEmpty()) {
+            append("\nTop blocked tracker domains\n")
+            profile.topTrackers.take(5).forEach { tracker ->
+                append("• ${tracker.domain} · ${tracker.provider} · ×${tracker.count}\n")
+            }
+        }
+
+        if (profile.recentDecisions.isNotEmpty()) {
+            append("\nRecent exact history\n")
+            profile.recentDecisions.take(5).forEach { decision ->
+                val time = DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(decision.lastSeenAt))
+                val state = if (decision.blocked) "BLOCKED" else "ALLOWED"
+                val repeats = if (decision.count > 1L) " · ×${decision.count}" else ""
+                append("• $time · $state · ${decision.domain}$repeats\n")
+            }
+        }
+
+        append("\nStored locally on this device from exact single-app Tracker Shield sessions. Shared multi-app DNS is not added because Guardian will not guess attribution.")
     }
 
     private fun StringBuilder.appendAppSignals(
@@ -689,6 +733,79 @@ class MainActivity : AppCompatActivity() {
             if (!requestedDomain.isNullOrBlank()) append(": $requestedDomain")
             append("\n")
         }
+    }
+
+    private fun refreshPrivacyHistorySummary() {
+        if (!::privacyHistoryView.isInitialized) return
+        val profiles = TrackerActivityStore.profiles(this)
+        val shieldActive = GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD
+
+        clearPrivacyHistoryButton.isEnabled = profiles.isNotEmpty() && !shieldActive
+
+        if (profiles.isEmpty()) {
+            privacyHistoryView.text =
+                "No exact per-app privacy history yet. Shield one app at a time to build a trustworthy local profile.\n\nHistory is stored only on this device and is bounded."
+            return
+        }
+
+        val totalDecisions = profiles.sumOf { it.retainedDecisions }
+        val totalBlocks = profiles.sumOf { it.blockedDecisions }
+        val latestSeen = profiles.maxOf { it.lastSeenAt }
+        val latestText = DateFormat.getDateTimeInstance(
+            DateFormat.SHORT,
+            DateFormat.SHORT
+        ).format(Date(latestSeen))
+
+        val appLines = profiles.take(5).joinToString("\n") { profile ->
+            "• ${profile.appLabel} · ${profile.blockedDecisions} blocks · ${profile.uniqueTrackerDomains} tracker domains"
+        }
+
+        privacyHistoryView.text = buildString {
+            append("${profiles.size} app profile(s) · $totalDecisions retained DNS decisions · $totalBlocks tracker blocks")
+            append("\nLatest exact activity: $latestText")
+            append("\n\nProfiles\n$appLines")
+            append("\n\nTap an app above and expand TRAFFIC for its detailed Privacy Profile.")
+            append("\n\nSaved locally on this device. Guardian does not add shared-attribution sessions to these profiles.")
+            if (shieldActive) append("\n\nStop Tracker Shield before clearing saved history.")
+        }
+    }
+
+    private fun confirmClearPrivacyHistory() {
+        if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            MaterialAlertDialogBuilder(this)
+                .setTitle("Stop Tracker Shield first")
+                .setMessage(
+                    "Guardian is still recording exact DNS decisions. Stop Tracker Shield before clearing saved privacy history so it does not immediately begin filling again."
+                )
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+
+        if (TrackerActivityStore.profiles(this).isEmpty()) {
+            refreshPrivacyHistorySummary()
+            return
+        }
+
+        MaterialAlertDialogBuilder(this)
+            .setTitle("Clear saved privacy history?")
+            .setMessage(
+                "This deletes Guardian's locally stored exact per-app DNS history. Firewall and Shield rules are kept, and the Guardian Timeline is not erased."
+            )
+            .setNegativeButton("CANCEL", null)
+            .setPositiveButton("CLEAR") { _, _ ->
+                TrackerActivityStore.clear(this)
+                GuardianEventStore.append(
+                    this,
+                    "INFO",
+                    "Privacy history cleared",
+                    "Saved exact per-app Tracker Shield history was deleted from this device. Firewall and Tracker Shield rules were left unchanged."
+                )
+                refreshPrivacyHistorySummary()
+                refreshExpandedAppTraffic()
+                refreshTimeline()
+            }
+            .show()
     }
 
     private fun refreshSummaries() {
@@ -873,6 +990,7 @@ class MainActivity : AppCompatActivity() {
         refreshRuleButtons()
         refreshSummaries()
         refreshTrafficActivity()
+        refreshPrivacyHistorySummary()
         refreshExpandedAppTraffic()
         refreshTimeline()
     }
