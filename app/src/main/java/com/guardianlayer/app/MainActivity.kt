@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
+import com.guardianlayer.app.data.TrackerActivityStore
 import com.guardianlayer.app.firewall.FirewallApp
 import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
@@ -513,6 +514,7 @@ class MainActivity : AppCompatActivity() {
         val shieldedPackages = TrackerShieldRuleStore.protectedPackages(this)
         val isBlocked = blockedPackages.contains(app.packageName)
         val isShielded = shieldedPackages.contains(app.packageName)
+        val privacyProfile = TrackerActivityStore.profile(this, app.packageName)
 
         val appPrefix = "${app.label} → "
         val blockedEndpoints = snapshot.recent.filter { it.protocol.startsWith(appPrefix) }
@@ -526,6 +528,7 @@ class MainActivity : AppCompatActivity() {
                 append("LOCK DOWN ACTIVE · DEVICE-WIDE TRAFFIC\n\n")
                 append("Guardian cannot safely separate this app's packets while Lock Down is routing the whole device through one blocking tunnel.")
                 appendAppSignals(exactEvents)
+                appendPrivacyHistory(privacyProfile)
             }
             return
         }
@@ -537,6 +540,7 @@ class MainActivity : AppCompatActivity() {
                     append("${blockedPackages.size} apps are sharing Guardian's blocking VPN. Guardian will not guess which individual packets belong to ${app.label}.\n\n")
                     append("For exact traffic here, temporarily leave only ${app.label} blocked.")
                     appendAppSignals(exactEvents)
+                    appendPrivacyHistory(privacyProfile)
                 }
             } else {
                 val endpoints = if (blockedEndpoints.isEmpty()) {
@@ -554,6 +558,7 @@ class MainActivity : AppCompatActivity() {
                     append(endpoints)
                     appendDnsActivity(appDns)
                     appendAppSignals(exactEvents)
+                    appendPrivacyHistory(privacyProfile)
                     append("\n\nExact because this is the only app routed into Smart Firewall.")
                 }
             }
@@ -566,7 +571,7 @@ class MainActivity : AppCompatActivity() {
                     append("SHIELDED · SHARED DNS ATTRIBUTION\n\n")
                     append("${shieldedPackages.size} apps are sharing Tracker Shield. Guardian is blocking matched tracker DNS requests, but will not guess which app made each query.\n\n")
                     append("Leave only ${app.label} shielded for exact per-app DNS activity.")
-                    appendAppSignals(exactEvents)
+                    appendPrivacyHistory(privacyProfile)
                 }
             } else {
                 val blocked = appDns.count { it.blockedByTrackerShield }
@@ -574,10 +579,11 @@ class MainActivity : AppCompatActivity() {
                 view.text = buildString {
                     append("SHIELDED · EXACT LIVE DNS\n\n")
                     append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
-                    append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} failures")
+                    append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} upstream failures")
+                    append("\n${snapshot.dnsUnsupportedPackets} unsupported packets · ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domains blocked")
                     append("\nVisible here: $blocked blocked · $allowed allowed recent entries")
                     appendDnsActivity(appDns)
-                    appendAppSignals(exactEvents)
+                    appendPrivacyHistory(privacyProfile)
                     append("\n\nNormal app traffic bypasses Guardian and stays online. This first shield only filters ordinary IPv4/UDP DNS; cached IPs and encrypted DNS can bypass it.")
                 }
             }
@@ -596,7 +602,8 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
                 if (lastExactShield) appendDnsActivity(appDns)
-                appendAppSignals(exactEvents)
+                if (privacyProfile != null) appendPrivacyHistory(privacyProfile)
+                else appendAppSignals(exactEvents)
             }
             return
         }
@@ -616,7 +623,8 @@ class MainActivity : AppCompatActivity() {
                     append("This app currently bypasses Guardian's VPN modes. Tap BLOCK for a full network block or SHIELD for DNS-level tracker filtering.")
                 }
             }
-            appendAppSignals(exactEvents)
+            if (privacyProfile != null) appendPrivacyHistory(privacyProfile)
+            else appendAppSignals(exactEvents)
         }
     }
 
@@ -634,6 +642,37 @@ class MainActivity : AppCompatActivity() {
                 append("• ALLOWED · ${entry.domain}\n")
             }
         }
+    }
+
+    private fun StringBuilder.appendPrivacyHistory(profile: TrackerActivityStore.AppProfile?) {
+        if (profile == null) return
+
+        val lastSeen = DateFormat.getDateTimeInstance(
+            DateFormat.SHORT,
+            DateFormat.SHORT
+        ).format(Date(profile.lastSeenAt))
+
+        append("\n\nPRIVACY HISTORY · EXACT ATTRIBUTION\n")
+        append("${profile.retainedDecisions} retained DNS decisions · ${profile.blockedDecisions} tracker blocks · ${profile.allowedDecisions} allowed\n")
+        append("${profile.uniqueTrackerDomains} unique tracker domains · Last seen $lastSeen")
+
+        if (profile.topTrackers.isNotEmpty()) {
+            append("\n\nTop blocked tracker domains\n")
+            profile.topTrackers.take(5).forEach { tracker ->
+                append("• ${tracker.domain} · ${tracker.provider} · ${tracker.category} · ×${tracker.count}\n")
+            }
+        }
+
+        if (profile.categories.isNotEmpty()) {
+            append("\nCategories: ")
+            append(
+                profile.categories.take(4).joinToString(" · ") {
+                    "${it.name} ${it.count}"
+                }
+            )
+        }
+
+        append("\n\nStored locally on this device from exact single-app Tracker Shield sessions. Guardian keeps a bounded history and does not add ambiguous multi-app DNS to this profile.")
     }
 
     private fun StringBuilder.appendAppSignals(
@@ -696,11 +735,21 @@ class MainActivity : AppCompatActivity() {
                     "• $prefix$category · ${entry.domain} · ${entry.sourceLabel}"
                 }
             }
+            val topBlocked = if (snapshot.topTrackerBlocks.isEmpty()) {
+                "No classified tracker domains blocked in this session."
+            } else {
+                snapshot.topTrackerBlocks.take(5).joinToString("\n") { tracker ->
+                    "• ${tracker.domain} · ${tracker.provider} · ×${tracker.count}"
+                }
+            }
             firewallActivityView.text = buildString {
                 append(heading)
                 append("\n\n")
                 append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
-                append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} failures")
+                append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} upstream failures")
+                append("\n${snapshot.dnsUnsupportedPackets} unsupported packets · ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domains blocked")
+                append("\n\nTop blocked tracker domains\n")
+                append(topBlocked)
                 append("\n\nRecent DNS decisions\n")
                 append(recent)
                 append("\n\nTracker Shield is intentionally DNS-only in this alpha. It does not decrypt HTTPS or encrypted DNS and does not claim to block cached/direct-IP tracker traffic.")

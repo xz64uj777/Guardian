@@ -14,6 +14,7 @@ import com.guardianlayer.app.MainActivity
 import com.guardianlayer.app.R
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
+import com.guardianlayer.app.data.TrackerActivityStore
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -552,6 +553,17 @@ class GuardianVpnService : VpnService() {
                     val dnsResponse = if (classification != null) {
                         trackerQueriesBlocked.incrementAndGet()
                         recordTrackerBlockCount(request.domain, classification)
+                        if (sourcePackage != null) {
+                            TrackerActivityStore.recordExact(
+                                context = this,
+                                packageName = sourcePackage,
+                                appLabel = sourceLabel,
+                                domain = request.domain,
+                                category = classification.category,
+                                provider = classification.provider,
+                                blocked = true
+                            )
+                        }
                         recordTrackerShieldDns(
                             request.domain,
                             classification,
@@ -563,6 +575,17 @@ class GuardianVpnService : VpnService() {
                         val forwarded = forwardDns(socket, upstreamDns, request.dnsPayload)
                         if (forwarded != null) {
                             dnsQueriesForwarded.incrementAndGet()
+                            if (sourcePackage != null) {
+                                TrackerActivityStore.recordExact(
+                                    context = this,
+                                    packageName = sourcePackage,
+                                    appLabel = sourceLabel,
+                                    domain = request.domain,
+                                    category = null,
+                                    provider = null,
+                                    blocked = false
+                                )
+                            }
                             recordDnsActivity(
                                 DnsActivity(
                                     timestamp = System.currentTimeMillis(),
