@@ -45,6 +45,16 @@ class TrackerDomainClassifierTest {
     }
 
     @Test
+    fun classifiesMicrosoftAtdmtObservedFromPhysicalTest() {
+        val result = TrackerDomainClassifier.classify("cx.atdmt.com")
+
+        assertNotNull(result)
+        assertEquals("Advertising", result!!.category)
+        assertEquals("Microsoft Advertising", result.provider)
+        assertEquals("atdmt.com", result.matchedDomain)
+    }
+
+    @Test
     fun classifiesSessionReplayVendor() {
         val result = TrackerDomainClassifier.classify("edge.fullstory.com")
 
@@ -58,6 +68,7 @@ class TrackerDomainClassifierTest {
         assertNull(TrackerDomainClassifier.classify("notdoubleclick.net"))
         assertNull(TrackerDomainClassifier.classify("exampleapp-measurement.com"))
         assertNull(TrackerDomainClassifier.classify("notamazon-adsystem.com"))
+        assertNull(TrackerDomainClassifier.classify("notatdmt.com"))
     }
 
     @Test
