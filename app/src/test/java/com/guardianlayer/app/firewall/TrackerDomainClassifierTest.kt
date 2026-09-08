@@ -35,6 +35,16 @@ class TrackerDomainClassifierTest {
     }
 
     @Test
+    fun classifiesAmazonAdsObservedFromPhysicalTest() {
+        val result = TrackerDomainClassifier.classify("web-video.ads.aps.amazon-adsystem.com")
+
+        assertNotNull(result)
+        assertEquals("Advertising", result!!.category)
+        assertEquals("Amazon Ads", result.provider)
+        assertEquals("amazon-adsystem.com", result.matchedDomain)
+    }
+
+    @Test
     fun classifiesSessionReplayVendor() {
         val result = TrackerDomainClassifier.classify("edge.fullstory.com")
 
@@ -47,6 +57,7 @@ class TrackerDomainClassifierTest {
     fun doesNotMatchLookalikeSuffix() {
         assertNull(TrackerDomainClassifier.classify("notdoubleclick.net"))
         assertNull(TrackerDomainClassifier.classify("exampleapp-measurement.com"))
+        assertNull(TrackerDomainClassifier.classify("notamazon-adsystem.com"))
     }
 
     @Test
