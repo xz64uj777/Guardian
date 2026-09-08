@@ -120,9 +120,50 @@ object TrackerActivityStore {
     }
 
     @Synchronized
-    fun profile(context: Context, packageName: String): AppProfile? {
-        val appEntries = entries(context)
-            .filter { it.packageName == packageName }
+    fun profile(context: Context, packageName: String): AppProfile? =
+        buildProfile(entries(context).filter { it.packageName == packageName })
+
+    @Synchronized
+    fun profiles(context: Context): List<AppProfile> {
+        return entries(context)
+            .groupBy { it.packageName }
+            .values
+            .mapNotNull(::buildProfile)
+            .sortedWith(
+                compareByDescending<AppProfile> { it.lastSeenAt }
+                    .thenByDescending { it.blockedDecisions }
+            )
+    }
+
+    @Synchronized
+    fun flush(context: Context) {
+        val snapshot = entries(context).toList()
+        persistNow(context.applicationContext, snapshot)
+        persistScheduled = false
+    }
+
+    /** Delete the exact-attribution history for one app while retaining others. */
+    @Synchronized
+    fun clearApp(context: Context, packageName: String): Boolean {
+        if (packageName.isBlank()) return false
+        val entries = entries(context)
+        val removed = entries.removeAll { it.packageName == packageName }
+        if (removed) persistNow(context.applicationContext, entries.toList())
+        return removed
+    }
+
+    /** Delete all locally retained exact-attribution Tracker Shield history. */
+    @Synchronized
+    fun clear(context: Context) {
+        cache = mutableListOf()
+        persistScheduled = false
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(KEY_ENTRIES)
+            .apply()
+    }
+
+    private fun buildProfile(appEntries: List<Decision>): AppProfile? {
         if (appEntries.isEmpty()) return null
 
         val retained = appEntries.sumOf { it.count }
@@ -133,7 +174,7 @@ object TrackerActivityStore {
         val topTrackers = trackerEntries
             .groupBy { it.domain }
             .map { (domain, matches) ->
-                val newest = matches.maxByOrNull { it.lastSeenAt }!!
+                val newest = matches.maxByOrNull { it.lastSeenAt } ?: return@map null
                 TrackerStat(
                     domain = domain,
                     category = newest.category ?: "Tracker",
@@ -142,6 +183,7 @@ object TrackerActivityStore {
                     lastSeenAt = matches.maxOf { it.lastSeenAt }
                 )
             }
+            .filterNotNull()
             .sortedWith(
                 compareByDescending<TrackerStat> { it.count }
                     .thenByDescending { it.lastSeenAt }
@@ -163,8 +205,9 @@ object TrackerActivityStore {
             .take(6)
 
         return AppProfile(
-            packageName = packageName,
-            appLabel = appEntries.first().appLabel,
+            packageName = appEntries.first().packageName,
+            appLabel = appEntries.maxByOrNull { it.lastSeenAt }?.appLabel
+                ?: appEntries.first().appLabel,
             retainedDecisions = retained,
             blockedDecisions = blocked,
             allowedDecisions = allowed,
@@ -176,23 +219,6 @@ object TrackerActivityStore {
             providers = providers,
             recentDecisions = appEntries.sortedByDescending { it.lastSeenAt }.take(8)
         )
-    }
-
-    @Synchronized
-    fun flush(context: Context) {
-        val snapshot = entries(context).toList()
-        persistNow(context.applicationContext, snapshot)
-        persistScheduled = false
-    }
-
-    @Synchronized
-    fun clear(context: Context) {
-        cache = mutableListOf()
-        persistScheduled = false
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .remove(KEY_ENTRIES)
-            .apply()
     }
 
     private fun entries(context: Context): MutableList<Decision> {
@@ -258,8 +284,10 @@ object TrackerActivityStore {
                             packageName = packageName,
                             appLabel = item.optString("appLabel", packageName),
                             domain = domain,
-                            category = item.optString("category").takeIf { it.isNotBlank() && it != "null" },
-                            provider = item.optString("provider").takeIf { it.isNotBlank() && it != "null" },
+                            category = item.optString("category")
+                                .takeIf { it.isNotBlank() && it != "null" },
+                            provider = item.optString("provider")
+                                .takeIf { it.isNotBlank() && it != "null" },
                             blocked = item.optBoolean("blocked"),
                             count = item.optLong("count", 1L).coerceAtLeast(1L)
                         )
