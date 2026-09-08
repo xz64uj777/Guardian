@@ -49,6 +49,7 @@ object TrackerDomainClassifier {
         Rule("criteo.com", "Advertising", "Criteo", "commonly used for advertising and retargeting"),
         Rule("criteo.net", "Advertising", "Criteo", "commonly used for advertising and retargeting"),
         Rule("adnxs.com", "Advertising", "Microsoft/Xandr", "commonly used for programmatic advertising"),
+        Rule("atdmt.com", "Advertising", "Microsoft Advertising", "historically used by Microsoft's Atlas advertising and measurement infrastructure"),
         Rule("pubmatic.com", "Advertising", "PubMatic", "commonly used for programmatic advertising"),
         Rule("rubiconproject.com", "Advertising", "Magnite", "commonly used for programmatic advertising"),
         Rule("openx.net", "Advertising", "OpenX", "commonly used for programmatic advertising"),
