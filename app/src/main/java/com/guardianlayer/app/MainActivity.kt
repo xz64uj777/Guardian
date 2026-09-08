@@ -191,11 +191,7 @@ class MainActivity : AppCompatActivity() {
         firewallActivityView = cardText("No Guardian network session recorded yet.")
         root.addView(firewallActivityView.withTop(dp(8)))
 
-        root.addView(sectionLabel("APP RULES · TAP AN APP FOR TRAFFIC").withTop(dp(22)))
-        firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        root.addView(firewallApps.withTop(dp(8)))
-
-        root.addView(sectionLabel("PRIVACY PROFILES · LOCAL HISTORY").withTop(dp(24)))
+        root.addView(sectionLabel("PRIVACY PROFILES · LOCAL HISTORY").withTop(dp(22)))
         privacyHistoryView = cardText(
             "No exact per-app privacy history yet. Shield one app at a time to build a trustworthy local profile."
         )
@@ -208,6 +204,10 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { confirmClearPrivacyHistory() }
         }
         root.addView(clearPrivacyHistoryButton.withTop(dp(8)))
+
+        root.addView(sectionLabel("APP RULES · TAP AN APP FOR TRAFFIC").withTop(dp(24)))
+        firewallApps = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        root.addView(firewallApps.withTop(dp(8)))
 
         val privacyButton = MaterialButton(this).apply {
             text = "RUN PRIVACY SNAPSHOT"
@@ -764,7 +764,7 @@ class MainActivity : AppCompatActivity() {
             append("${profiles.size} app profile(s) · $totalDecisions retained DNS decisions · $totalBlocks tracker blocks")
             append("\nLatest exact activity: $latestText")
             append("\n\nProfiles\n$appLines")
-            append("\n\nTap an app above and expand TRAFFIC for its detailed Privacy Profile.")
+            append("\n\nTap an app below and expand TRAFFIC for its detailed Privacy Profile.")
             append("\n\nSaved locally on this device. Guardian does not add shared-attribution sessions to these profiles.")
             if (shieldActive) append("\n\nStop Tracker Shield before clearing saved history.")
         }
