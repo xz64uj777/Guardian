@@ -84,6 +84,9 @@ class GuardianVpnService : VpnService() {
         private const val MAX_RECENT_DROPS = 12
         private const val MAX_RECENT_DNS = 20
         private const val VIRTUAL_DNS = "10.77.0.2"
+        private const val DNS_ATTEMPT_TIMEOUT_MS = 850
+        private const val DNS_RESPONSE_BUFFER_SIZE = 8192
+        private const val MAX_DNS_UPSTREAMS = 3
 
         @Volatile
         private var mode = Mode.OFF
@@ -105,6 +108,9 @@ class GuardianVpnService : VpnService() {
         private val dnsQueriesForwarded = AtomicLong(0)
         private val dnsFailures = AtomicLong(0)
         private val dnsUnsupportedPackets = AtomicLong(0)
+        private val dnsRetryRecoveries = AtomicLong(0)
+        private val dnsAttemptTimeouts = AtomicLong(0)
+        private val dnsIgnoredResponses = AtomicLong(0)
 
         private val trafficLock = Any()
         private val recentDrops = ArrayDeque<TrafficDrop>()
@@ -156,6 +162,9 @@ class GuardianVpnService : VpnService() {
             dnsQueriesForwarded.set(0)
             dnsFailures.set(0)
             dnsUnsupportedPackets.set(0)
+            dnsRetryRecoveries.set(0)
+            dnsAttemptTimeouts.set(0)
+            dnsIgnoredResponses.set(0)
             synchronized(trafficLock) {
                 recentDrops.clear()
                 recentDns.clear()
@@ -510,7 +519,7 @@ class GuardianVpnService : VpnService() {
         val descriptor = vpnInterface?.fileDescriptor ?: return
         val input = FileInputStream(descriptor)
         val output = FileOutputStream(descriptor)
-        val socket = DatagramSocket().apply { soTimeout = 1800 }
+        val socket = DatagramSocket().apply { soTimeout = DNS_ATTEMPT_TIMEOUT_MS }
         if (!protect(socket)) {
             runCatching { socket.close() }
             GuardianEventStore.append(
@@ -632,16 +641,57 @@ class GuardianVpnService : VpnService() {
         upstreamDns: InetAddress,
         query: ByteArray
     ): ByteArray? {
+        if (query.size < 2) return null
+
+        val candidates = resolveUpstreamDnsCandidates(upstreamDns)
+        candidates.forEachIndexed { index, resolver ->
+            val response = queryDnsResolver(socket, resolver, query)
+            if (response != null) {
+                if (index > 0) dnsRetryRecoveries.incrementAndGet()
+                return response
+            }
+        }
+        return null
+    }
+
+    private fun queryDnsResolver(
+        socket: DatagramSocket,
+        resolver: InetAddress,
+        query: ByteArray
+    ): ByteArray? {
         return try {
-            socket.send(DatagramPacket(query, query.size, upstreamDns, 53))
-            val buffer = ByteArray(4096)
-            val response = DatagramPacket(buffer, buffer.size)
-            socket.receive(response)
-            if (response.length < 12) return null
-            if (query.size >= 2 &&
-                (buffer[0] != query[0] || buffer[1] != query[1])) return null
-            buffer.copyOf(response.length)
-        } catch (_: SocketTimeoutException) {
+            socket.send(DatagramPacket(query, query.size, resolver, 53))
+            val deadline = System.currentTimeMillis() + DNS_ATTEMPT_TIMEOUT_MS
+
+            while (draining) {
+                val remaining = (deadline - System.currentTimeMillis()).toInt()
+                if (remaining <= 0) {
+                    dnsAttemptTimeouts.incrementAndGet()
+                    return null
+                }
+
+                socket.soTimeout = remaining.coerceAtLeast(1)
+                val buffer = ByteArray(DNS_RESPONSE_BUFFER_SIZE)
+                val response = DatagramPacket(buffer, buffer.size)
+                try {
+                    socket.receive(response)
+                } catch (_: SocketTimeoutException) {
+                    dnsAttemptTimeouts.incrementAndGet()
+                    return null
+                }
+
+                val matchingSource = response.address == resolver && response.port == 53
+                val validHeader = response.length >= 12 && (buffer[2].toInt() and 0x80) != 0
+                val matchingTransaction =
+                    response.length >= 2 && buffer[0] == query[0] && buffer[1] == query[1]
+
+                if (!matchingSource || !validHeader || !matchingTransaction) {
+                    dnsIgnoredResponses.incrementAndGet()
+                    continue
+                }
+
+                return buffer.copyOf(response.length)
+            }
             null
         } catch (_: Throwable) {
             null
@@ -740,6 +790,24 @@ class GuardianVpnService : VpnService() {
         return fromNetwork ?: InetAddress.getByName("1.1.1.1")
     }
 
+    private fun resolveUpstreamDnsCandidates(initial: InetAddress): List<InetAddress> {
+        val candidates = LinkedHashSet<InetAddress>()
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+
+        runCatching {
+            val network = connectivity.activeNetwork ?: return@runCatching
+            connectivity.getLinkProperties(network)
+                ?.dnsServers
+                ?.filter { it is Inet4Address && it.hostAddress != VIRTUAL_DNS }
+                ?.forEach { candidates.add(it) }
+        }
+
+        candidates.add(initial)
+        runCatching { candidates.add(InetAddress.getByName("1.1.1.1")) }
+        runCatching { candidates.add(InetAddress.getByName("8.8.8.8")) }
+        return candidates.take(MAX_DNS_UPSTREAMS)
+    }
+
     @Synchronized
     private fun stopVpn(logEvent: Boolean) {
         val previousMode = mode
@@ -786,7 +854,7 @@ class GuardianVpnService : VpnService() {
                         this,
                         "INFO",
                         "Tracker Shield stopped",
-                        "Guardian restored normal DNS handling after blocking ${snapshot.trackerQueriesBlocked} tracker request(s) across ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domain(s), forwarding ${snapshot.dnsQueriesForwarded}, recording ${snapshot.dnsFailures} actual upstream DNS failure(s), and ignoring ${snapshot.dnsUnsupportedPackets} unsupported packet(s). Top blocked: $top"
+                        "Guardian restored normal DNS handling after blocking ${snapshot.trackerQueriesBlocked} tracker request(s) across ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domain(s), forwarding ${snapshot.dnsQueriesForwarded}, recording ${snapshot.dnsFailures} final upstream DNS failure(s), and ignoring ${snapshot.dnsUnsupportedPackets} unsupported packet(s). DNS retry diagnostics: ${dnsRetryRecoveries.get()} query(s) recovered by a fallback resolver, ${dnsAttemptTimeouts.get()} resolver attempt timeout(s), and ${dnsIgnoredResponses.get()} stale/malformed response(s) ignored. Top blocked: $top"
                     )
                 }
                 Mode.LOCKDOWN, Mode.FIREWALL -> GuardianEventStore.append(
