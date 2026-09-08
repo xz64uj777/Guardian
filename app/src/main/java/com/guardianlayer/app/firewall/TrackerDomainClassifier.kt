@@ -44,6 +44,7 @@ object TrackerDomainClassifier {
         Rule("googlesyndication.com", "Advertising", "Google Ads", "commonly used for advertising delivery"),
         Rule("adservice.google.com", "Advertising", "Google Ads", "commonly used for advertising and conversion measurement"),
         Rule("googleadservices.com", "Advertising", "Google Ads", "commonly used for advertising and conversion measurement"),
+        Rule("amazon-adsystem.com", "Advertising", "Amazon Ads", "commonly used for advertising delivery, bidding, or measurement"),
         Rule("adsrvr.org", "Advertising", "The Trade Desk", "commonly used for advertising delivery or measurement"),
         Rule("criteo.com", "Advertising", "Criteo", "commonly used for advertising and retargeting"),
         Rule("criteo.net", "Advertising", "Criteo", "commonly used for advertising and retargeting"),
