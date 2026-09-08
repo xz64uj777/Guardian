@@ -11,8 +11,8 @@ android {
         applicationId = "com.guardianlayer.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 14
-        versionName = "0.3.3-alpha"
+        versionCode = 15
+        versionName = "0.3.4-alpha"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
