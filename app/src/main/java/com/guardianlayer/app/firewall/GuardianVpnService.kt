@@ -165,6 +165,7 @@ class GuardianVpnService : VpnService() {
             dnsRetryRecoveries.set(0)
             dnsAttemptTimeouts.set(0)
             dnsIgnoredResponses.set(0)
+            TrackerShieldDiagnostics.reset()
             synchronized(trafficLock) {
                 recentDrops.clear()
                 recentDns.clear()
@@ -549,6 +550,7 @@ class GuardianVpnService : VpnService() {
                     val request = DnsPacketCodec.parseIpv4UdpRequest(buffer, count)
                     if (request == null) {
                         dnsUnsupportedPackets.incrementAndGet()
+                        TrackerShieldDiagnostics.recordUnsupported(buffer, count)
                         continue
                     }
 
@@ -608,6 +610,7 @@ class GuardianVpnService : VpnService() {
                             )
                         } else {
                             dnsFailures.incrementAndGet()
+                            TrackerShieldDiagnostics.recordFinalFailure(request.domain)
                         }
                         forwarded
                     }
@@ -647,7 +650,10 @@ class GuardianVpnService : VpnService() {
         candidates.forEachIndexed { index, resolver ->
             val response = queryDnsResolver(socket, resolver, query)
             if (response != null) {
-                if (index > 0) dnsRetryRecoveries.incrementAndGet()
+                if (index > 0) {
+                    dnsRetryRecoveries.incrementAndGet()
+                    TrackerShieldDiagnostics.recordRetryRecovery()
+                }
                 return response
             }
         }
@@ -667,6 +673,7 @@ class GuardianVpnService : VpnService() {
                 val remaining = (deadline - System.currentTimeMillis()).toInt()
                 if (remaining <= 0) {
                     dnsAttemptTimeouts.incrementAndGet()
+                    TrackerShieldDiagnostics.recordResolverAttemptTimeout()
                     return null
                 }
 
@@ -677,6 +684,7 @@ class GuardianVpnService : VpnService() {
                     socket.receive(response)
                 } catch (_: SocketTimeoutException) {
                     dnsAttemptTimeouts.incrementAndGet()
+                    TrackerShieldDiagnostics.recordResolverAttemptTimeout()
                     return null
                 }
 
@@ -687,6 +695,7 @@ class GuardianVpnService : VpnService() {
 
                 if (!matchingSource || !validHeader || !matchingTransaction) {
                     dnsIgnoredResponses.incrementAndGet()
+                    TrackerShieldDiagnostics.recordIgnoredResponse()
                     continue
                 }
 
@@ -850,11 +859,20 @@ class GuardianVpnService : VpnService() {
                             "${it.domain} (${it.provider}) ×${it.count}"
                         }
                     }
+                    val diagnostics = TrackerShieldDiagnostics.snapshot()
+                    val unsupportedBreakdown =
+                        "TCP-DNS ${diagnostics.unsupportedIpv4TcpDns}, IPv6 ${diagnostics.unsupportedIpv6}, " +
+                            "UDP-other ${diagnostics.unsupportedIpv4UdpOther}, IPv4-other ${diagnostics.unsupportedIpv4Other}, malformed ${diagnostics.unsupportedMalformed}"
+                    val failedDomains = if (diagnostics.failedDomains.isEmpty()) {
+                        "none"
+                    } else {
+                        diagnostics.failedDomains.joinToString("; ") { "${it.domain} ×${it.count}" }
+                    }
                     GuardianEventStore.append(
                         this,
                         "INFO",
                         "Tracker Shield stopped",
-                        "Guardian restored normal DNS handling after blocking ${snapshot.trackerQueriesBlocked} tracker request(s) across ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domain(s), forwarding ${snapshot.dnsQueriesForwarded}, recording ${snapshot.dnsFailures} final upstream DNS failure(s), and ignoring ${snapshot.dnsUnsupportedPackets} unsupported packet(s). DNS retry diagnostics: ${dnsRetryRecoveries.get()} query(s) recovered by a fallback resolver, ${dnsAttemptTimeouts.get()} resolver attempt timeout(s), and ${dnsIgnoredResponses.get()} stale/malformed response(s) ignored. Top blocked: $top"
+                        "Guardian restored normal DNS handling after blocking ${snapshot.trackerQueriesBlocked} tracker request(s) across ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domain(s), forwarding ${snapshot.dnsQueriesForwarded}, recording ${snapshot.dnsFailures} final upstream DNS failure(s), and ignoring ${snapshot.dnsUnsupportedPackets} unsupported packet(s). Unsupported breakdown: $unsupportedBreakdown. DNS retry diagnostics: ${diagnostics.retryRecoveries} query(s) recovered by a fallback resolver, ${diagnostics.resolverAttemptTimeouts} resolver attempt timeout(s), and ${diagnostics.ignoredResponses} stale/malformed response(s) ignored. Final failed domains: $failedDomains. Top blocked: $top"
                     )
                 }
                 Mode.LOCKDOWN, Mode.FIREWALL -> GuardianEventStore.append(
