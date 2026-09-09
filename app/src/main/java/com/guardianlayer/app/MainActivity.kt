@@ -615,6 +615,7 @@ class MainActivity : AppCompatActivity() {
                     append("TCP DNS ${diagnostics.unsupportedIpv4TcpDns} · TCP other ${diagnostics.unsupportedIpv4TcpOther} · UDP other ${diagnostics.unsupportedIpv4UdpOther}")
                     append("\nICMP ${diagnostics.unsupportedIpv4Icmp} · fragments ${diagnostics.unsupportedIpv4Fragments} · other IPv4 protocol $rawOtherIpv4")
                     append("\nIPv6 ${diagnostics.unsupportedIpv6} · malformed ${diagnostics.unsupportedMalformed}")
+                    appendUnsupportedSamples(diagnostics)
                     append("\n\n${privateDnsStatusText()}")
                     appendDnsActivity(appDns)
                     appendPrivacyHistory(privacyProfile)
@@ -676,6 +677,24 @@ class MainActivity : AppCompatActivity() {
                 append("• ALLOWED · ${entry.domain}\n")
             }
         }
+    }
+
+    private fun StringBuilder.appendUnsupportedSamples(
+        diagnostics: TrackerShieldDiagnostics.Snapshot
+    ) {
+        if (diagnostics.unsupportedSamples.isEmpty()) return
+        append("\n\nRecent unsupported destinations\n")
+        diagnostics.unsupportedSamples.take(6).forEach { sample ->
+            val endpoint = if (sample.address == "unparsed") {
+                "unparsed destination"
+            } else {
+                formatEndpoint(sample.address, sample.port)
+            }
+            append("• ${sample.kind} · ${sample.protocol} · $endpoint")
+            if (sample.count > 1L) append(" · ×${sample.count}")
+            append("\n")
+        }
+        append("Destination metadata only; Guardian does not store unsupported packet payloads.")
     }
 
     private fun StringBuilder.appendPrivacyHistory(profile: TrackerActivityStore.AppProfile?) {
@@ -899,6 +918,7 @@ class MainActivity : AppCompatActivity() {
                 append("TCP DNS ${diagnostics.unsupportedIpv4TcpDns} · TCP other ${diagnostics.unsupportedIpv4TcpOther} · UDP other ${diagnostics.unsupportedIpv4UdpOther}")
                 append("\nICMP ${diagnostics.unsupportedIpv4Icmp} · fragments ${diagnostics.unsupportedIpv4Fragments} · other IPv4 protocol $rawOtherIpv4")
                 append("\nIPv6 ${diagnostics.unsupportedIpv6} · malformed ${diagnostics.unsupportedMalformed}")
+                appendUnsupportedSamples(diagnostics)
                 append("\n\nEncrypted DNS visibility\n")
                 append(privateDnsStatusText())
                 append("\nApp-specific DoH/DoT cannot be identified from this DNS-only tunnel without routing and inspecting the app's normal encrypted traffic, which Guardian does not do in Tracker Shield.")
