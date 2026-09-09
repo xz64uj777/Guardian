@@ -9,6 +9,7 @@ import android.net.ConnectivityManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.system.OsConstants
 import androidx.core.app.NotificationCompat
 import com.guardianlayer.app.MainActivity
 import com.guardianlayer.app.R
@@ -421,6 +422,14 @@ class GuardianVpnService : VpnService() {
             .addRoute(VIRTUAL_DNS, 32)
             .setBlocking(true)
 
+        // Tracker Shield currently owns only the IPv4 virtual DNS route. Explicitly
+        // let IPv6 bypass the TUN so an IPv4-only DNS filter never blackholes normal
+        // IPv6 app traffic. IPv6 DNS remains outside this alpha's filtering coverage.
+        val ipv6BypassEnabled = runCatching {
+            builder.allowFamily(OsConstants.AF_INET6)
+            true
+        }.getOrDefault(false)
+
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
         val effectivePackages = mutableListOf<String>()
@@ -455,11 +464,16 @@ class GuardianVpnService : VpnService() {
         mode = Mode.TRACKER_SHIELD
         GuardianStateStore.setLockdownActive(this, false)
 
+        val ipv6Note = if (ipv6BypassEnabled) {
+            " IPv6 traffic bypasses Guardian rather than being dropped because this alpha filters only IPv4/UDP DNS."
+        } else {
+            " Android did not accept Guardian's IPv6 bypass request, so unsupported IPv6 packets may still appear."
+        }
         GuardianEventStore.append(
             this,
             "INFO",
             "Tracker Shield activated",
-            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online. Encrypted DNS, cached destinations, and direct-IP traffic may bypass this first DNS-only shield."
+            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online.$ipv6Note Encrypted DNS, cached destinations, and direct-IP traffic may bypass this first DNS-only shield."
         )
 
         startTrackerDnsLoop(upstreamDns)
