@@ -5,14 +5,24 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Session-local diagnostics for Tracker Shield. These counters explain packets
- * that do not fit Guardian's current IPv4/UDP DNS forwarding path and preserve
- * only aggregate metadata; no payloads are stored.
+ * that do not fit Guardian's current IPv4/UDP DNS forwarding path. A small,
+ * bounded set of destination metadata is retained in memory for the current
+ * session only; packet payloads are never stored.
  */
 object TrackerShieldDiagnostics {
 
     data class FailedDomain(
         val domain: String,
         val count: Long
+    )
+
+    data class UnsupportedSample(
+        val kind: String,
+        val protocol: String,
+        val address: String,
+        val port: Int?,
+        val count: Long,
+        val lastSeenAt: Long
     )
 
     data class Snapshot(
@@ -28,7 +38,8 @@ object TrackerShieldDiagnostics {
         val retryRecoveries: Long,
         val resolverAttemptTimeouts: Long,
         val ignoredResponses: Long,
-        val failedDomains: List<FailedDomain>
+        val failedDomains: List<FailedDomain>,
+        val unsupportedSamples: List<UnsupportedSample>
     ) {
         val unsupportedTotal: Long
             get() = unsupportedIpv4TcpDns + unsupportedIpv4UdpOther +
@@ -50,6 +61,10 @@ object TrackerShieldDiagnostics {
     private val failedDomainLock = Any()
     private val failedDomainCounts = linkedMapOf<String, Long>()
 
+    private val sampleLock = Any()
+    private val unsupportedSampleCounts = linkedMapOf<String, UnsupportedSample>()
+    private const val MAX_UNSUPPORTED_SAMPLE_KEYS = 16
+
     fun reset() {
         unsupportedIpv4TcpDns.set(0)
         unsupportedIpv4TcpOther.set(0)
@@ -63,10 +78,12 @@ object TrackerShieldDiagnostics {
         resolverAttemptTimeouts.set(0)
         ignoredResponses.set(0)
         synchronized(failedDomainLock) { failedDomainCounts.clear() }
+        synchronized(sampleLock) { unsupportedSampleCounts.clear() }
     }
 
     fun recordUnsupported(packet: ByteArray, length: Int) {
-        when (classifyUnsupported(packet, length)) {
+        val kind = classifyUnsupported(packet, length)
+        when (kind) {
             UnsupportedKind.IPV4_TCP_DNS -> unsupportedIpv4TcpDns.incrementAndGet()
             UnsupportedKind.IPV4_TCP_OTHER -> {
                 unsupportedIpv4TcpOther.incrementAndGet()
@@ -85,6 +102,7 @@ object TrackerShieldDiagnostics {
             UnsupportedKind.IPV6 -> unsupportedIpv6.incrementAndGet()
             UnsupportedKind.MALFORMED -> unsupportedMalformed.incrementAndGet()
         }
+        recordUnsupportedSample(kind, packet, length)
     }
 
     fun recordRetryRecovery() {
@@ -118,6 +136,14 @@ object TrackerShieldDiagnostics {
                 .take(6)
                 .map { FailedDomain(it.key, it.value) }
         }
+        val samples = synchronized(sampleLock) {
+            unsupportedSampleCounts.values
+                .sortedWith(
+                    compareByDescending<UnsupportedSample> { it.count }
+                        .thenByDescending { it.lastSeenAt }
+                )
+                .take(8)
+        }
         return Snapshot(
             unsupportedIpv4TcpDns = unsupportedIpv4TcpDns.get(),
             unsupportedIpv4TcpOther = unsupportedIpv4TcpOther.get(),
@@ -130,8 +156,49 @@ object TrackerShieldDiagnostics {
             retryRecoveries = retryRecoveries.get(),
             resolverAttemptTimeouts = resolverAttemptTimeouts.get(),
             ignoredResponses = ignoredResponses.get(),
-            failedDomains = failures
+            failedDomains = failures,
+            unsupportedSamples = samples
         )
+    }
+
+    private fun recordUnsupportedSample(kind: UnsupportedKind, packet: ByteArray, length: Int) {
+        val destination = PacketInspector.inspect(packet, length)
+        val kindLabel = when (kind) {
+            UnsupportedKind.IPV4_TCP_DNS -> "TCP DNS"
+            UnsupportedKind.IPV4_TCP_OTHER -> "TCP other"
+            UnsupportedKind.IPV4_UDP_OTHER -> "UDP other"
+            UnsupportedKind.IPV4_ICMP -> "ICMP"
+            UnsupportedKind.IPV4_FRAGMENT -> "IPv4 fragment"
+            UnsupportedKind.IPV4_OTHER -> "Other IPv4"
+            UnsupportedKind.IPV6 -> "IPv6"
+            UnsupportedKind.MALFORMED -> "Malformed"
+        }
+        val protocol = destination?.protocol ?: when (kind) {
+            UnsupportedKind.IPV4_TCP_DNS, UnsupportedKind.IPV4_TCP_OTHER -> "TCP"
+            UnsupportedKind.IPV4_UDP_OTHER -> "UDP"
+            UnsupportedKind.IPV4_ICMP -> "ICMP"
+            else -> "OTHER"
+        }
+        val address = destination?.address ?: "unparsed"
+        val port = destination?.port
+        val key = "$kindLabel|$protocol|$address|${port ?: -1}"
+        val now = System.currentTimeMillis()
+
+        synchronized(sampleLock) {
+            val previous = unsupportedSampleCounts[key]
+            unsupportedSampleCounts[key] = UnsupportedSample(
+                kind = kindLabel,
+                protocol = protocol,
+                address = address,
+                port = port,
+                count = (previous?.count ?: 0L) + 1L,
+                lastSeenAt = now
+            )
+            while (unsupportedSampleCounts.size > MAX_UNSUPPORTED_SAMPLE_KEYS) {
+                val oldest = unsupportedSampleCounts.minByOrNull { it.value.lastSeenAt }?.key ?: break
+                unsupportedSampleCounts.remove(oldest)
+            }
+        }
     }
 
     internal fun classifyUnsupported(packet: ByteArray, length: Int): UnsupportedKind {
