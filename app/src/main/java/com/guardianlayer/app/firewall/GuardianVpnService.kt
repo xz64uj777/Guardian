@@ -6,6 +6,7 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
+import android.net.IpPrefix
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -422,13 +423,24 @@ class GuardianVpnService : VpnService() {
             .addRoute(VIRTUAL_DNS, 32)
             .setBlocking(true)
 
-        // Tracker Shield currently owns only the IPv4 virtual DNS route. Explicitly
-        // let IPv6 bypass the TUN so an IPv4-only DNS filter never blackholes normal
-        // IPv6 app traffic. IPv6 DNS remains outside this alpha's filtering coverage.
-        val ipv6BypassEnabled = runCatching {
-            builder.allowFamily(OsConstants.AF_INET6)
-            true
-        }.getOrDefault(false)
+        // Android 13+ supports explicit route exclusions. Make Tracker Shield a
+        // true split tunnel: only the virtual DNS /32 enters Guardian; every other
+        // IPv4/IPv6 destination is explicitly excluded and should fall through to
+        // the underlying network. The more-specific 10.77.0.2/32 include route wins
+        // over the IPv4 /0 exclusion by longest-prefix matching.
+        val explicitDnsOnlyRouting = if (Build.VERSION.SDK_INT >= 33) {
+            runCatching {
+                builder.excludeRoute(IpPrefix(InetAddress.getByName("0.0.0.0"), 0))
+                builder.excludeRoute(IpPrefix(InetAddress.getByName("::"), 0))
+                builder.allowFamily(OsConstants.AF_INET6)
+                true
+            }.getOrDefault(false)
+        } else {
+            runCatching {
+                builder.allowFamily(OsConstants.AF_INET6)
+                true
+            }.getOrDefault(false)
+        }
 
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
@@ -464,16 +476,18 @@ class GuardianVpnService : VpnService() {
         mode = Mode.TRACKER_SHIELD
         GuardianStateStore.setLockdownActive(this, false)
 
-        val ipv6Note = if (ipv6BypassEnabled) {
-            " IPv6 traffic bypasses Guardian rather than being dropped because this alpha filters only IPv4/UDP DNS."
+        val routingNote = if (explicitDnsOnlyRouting && Build.VERSION.SDK_INT >= 33) {
+            " Guardian explicitly excludes non-DNS IPv4 and IPv6 routes so only its virtual IPv4 DNS endpoint should enter the tunnel."
+        } else if (explicitDnsOnlyRouting) {
+            " IPv6 is allowed to fall through to the underlying network while Guardian keeps only its virtual IPv4 DNS route."
         } else {
-            " Android did not accept Guardian's IPv6 bypass request, so unsupported IPv6 packets may still appear."
+            " Android did not accept Guardian's split-routing request, so non-DNS packets may still appear as unsupported."
         }
         GuardianEventStore.append(
             this,
             "INFO",
             "Tracker Shield activated",
-            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online.$ipv6Note Encrypted DNS, cached destinations, and direct-IP traffic may bypass this first DNS-only shield."
+            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online.$routingNote Encrypted DNS, cached destinations, and direct-IP traffic may bypass this DNS-only shield."
         )
 
         startTrackerDnsLoop(upstreamDns)
