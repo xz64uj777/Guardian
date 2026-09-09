@@ -4,7 +4,9 @@ import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.net.ConnectivityManager
 import android.net.VpnService
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -596,15 +598,27 @@ class MainActivity : AppCompatActivity() {
             } else {
                 val blocked = appDns.count { it.blockedByTrackerShield }
                 val allowed = appDns.count { !it.blockedByTrackerShield }
+                val diagnostics = TrackerShieldDiagnostics.snapshot()
+                val rawOtherIpv4 = (
+                    diagnostics.unsupportedIpv4Other -
+                        diagnostics.unsupportedIpv4TcpOther -
+                        diagnostics.unsupportedIpv4Icmp -
+                        diagnostics.unsupportedIpv4Fragments
+                    ).coerceAtLeast(0L)
                 view.text = buildString {
                     append("SHIELDED · EXACT LIVE DNS\n\n")
                     append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
                     append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} upstream failures")
                     append("\n${snapshot.dnsUnsupportedPackets} unsupported packets · ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domains blocked")
                     append("\nVisible here: $blocked blocked · $allowed allowed recent entries")
+                    append("\n\nUnsupported detail\n")
+                    append("TCP DNS ${diagnostics.unsupportedIpv4TcpDns} · TCP other ${diagnostics.unsupportedIpv4TcpOther} · UDP other ${diagnostics.unsupportedIpv4UdpOther}")
+                    append("\nICMP ${diagnostics.unsupportedIpv4Icmp} · fragments ${diagnostics.unsupportedIpv4Fragments} · other IPv4 protocol $rawOtherIpv4")
+                    append("\nIPv6 ${diagnostics.unsupportedIpv6} · malformed ${diagnostics.unsupportedMalformed}")
+                    append("\n\n${privateDnsStatusText()}")
                     appendDnsActivity(appDns)
                     appendPrivacyHistory(privacyProfile)
-                    append("\n\nNormal app traffic bypasses Guardian and stays online. This first shield only filters ordinary IPv4/UDP DNS; cached IPs and encrypted DNS can bypass it.")
+                    append("\n\nNormal app traffic bypasses Guardian and stays online. This shield filters ordinary IPv4/UDP DNS only. Android Private DNS or app-specific DoH/DoT can be encrypted outside Guardian's DNS visibility; cached and direct-IP traffic can bypass DNS entirely.")
                 }
             }
             return
@@ -841,6 +855,12 @@ class MainActivity : AppCompatActivity() {
 
         if (displayMode == GuardianVpnService.Mode.TRACKER_SHIELD) {
             val diagnostics = TrackerShieldDiagnostics.snapshot()
+            val rawOtherIpv4 = (
+                diagnostics.unsupportedIpv4Other -
+                    diagnostics.unsupportedIpv4TcpOther -
+                    diagnostics.unsupportedIpv4Icmp -
+                    diagnostics.unsupportedIpv4Fragments
+                ).coerceAtLeast(0L)
             val heading = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
                 "LIVE TRACKER SHIELD"
             } else {
@@ -876,8 +896,12 @@ class MainActivity : AppCompatActivity() {
                 append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} upstream failures")
                 append("\n${snapshot.dnsUnsupportedPackets} unsupported packets · ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domains blocked")
                 append("\n\nUnsupported packet breakdown\n")
-                append("IPv6 ${diagnostics.unsupportedIpv6} · TCP DNS ${diagnostics.unsupportedIpv4TcpDns}")
-                append("\nOther UDP ${diagnostics.unsupportedIpv4UdpOther} · Other IPv4 ${diagnostics.unsupportedIpv4Other} · malformed ${diagnostics.unsupportedMalformed}")
+                append("TCP DNS ${diagnostics.unsupportedIpv4TcpDns} · TCP other ${diagnostics.unsupportedIpv4TcpOther} · UDP other ${diagnostics.unsupportedIpv4UdpOther}")
+                append("\nICMP ${diagnostics.unsupportedIpv4Icmp} · fragments ${diagnostics.unsupportedIpv4Fragments} · other IPv4 protocol $rawOtherIpv4")
+                append("\nIPv6 ${diagnostics.unsupportedIpv6} · malformed ${diagnostics.unsupportedMalformed}")
+                append("\n\nEncrypted DNS visibility\n")
+                append(privateDnsStatusText())
+                append("\nApp-specific DoH/DoT cannot be identified from this DNS-only tunnel without routing and inspecting the app's normal encrypted traffic, which Guardian does not do in Tracker Shield.")
                 append("\n\nDNS reliability\n")
                 append("Fallback recoveries ${diagnostics.retryRecoveries} · resolver timeouts ${diagnostics.resolverAttemptTimeouts} · stale/malformed responses ignored ${diagnostics.ignoredResponses}")
                 append("\nFinal failed domains\n")
@@ -930,6 +954,25 @@ class MainActivity : AppCompatActivity() {
             append("\n\nRecent blocked destinations\n")
             append(recentText)
             append("\n\nWith one selected app Guardian can label traffic directly. With multiple selected apps attribution remains shared instead of guessed.")
+        }
+    }
+
+    private fun privateDnsStatusText(): String {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) {
+            return "Android Private DNS: status unavailable on this Android version"
+        }
+        val connectivity = getSystemService(ConnectivityManager::class.java)
+        val properties = runCatching {
+            val network = connectivity.activeNetwork ?: return@runCatching null
+            connectivity.getLinkProperties(network)
+        }.getOrNull() ?: return "Android Private DNS: network status unavailable"
+
+        if (!properties.isPrivateDnsActive) return "Android Private DNS: OFF"
+        val server = properties.privateDnsServerName?.trim()?.takeIf { it.isNotEmpty() }
+        return if (server == null) {
+            "Android Private DNS: ON · encrypted resolver active"
+        } else {
+            "Android Private DNS: ON · $server"
         }
     }
 
