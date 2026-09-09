@@ -1,0 +1,153 @@
+package com.guardianlayer.app.firewall
+
+import java.util.Locale
+import java.util.concurrent.atomic.AtomicLong
+
+/**
+ * Session-local diagnostics for Tracker Shield. These counters explain packets
+ * that do not fit Guardian's current IPv4/UDP DNS forwarding path and preserve
+ * only aggregate metadata; no payloads are stored.
+ */
+object TrackerShieldDiagnostics {
+
+    data class FailedDomain(
+        val domain: String,
+        val count: Long
+    )
+
+    data class Snapshot(
+        val unsupportedIpv4TcpDns: Long,
+        val unsupportedIpv4UdpOther: Long,
+        val unsupportedIpv4Other: Long,
+        val unsupportedIpv6: Long,
+        val unsupportedMalformed: Long,
+        val retryRecoveries: Long,
+        val resolverAttemptTimeouts: Long,
+        val ignoredResponses: Long,
+        val failedDomains: List<FailedDomain>
+    ) {
+        val unsupportedTotal: Long
+            get() = unsupportedIpv4TcpDns + unsupportedIpv4UdpOther +
+                unsupportedIpv4Other + unsupportedIpv6 + unsupportedMalformed
+    }
+
+    private val unsupportedIpv4TcpDns = AtomicLong(0)
+    private val unsupportedIpv4UdpOther = AtomicLong(0)
+    private val unsupportedIpv4Other = AtomicLong(0)
+    private val unsupportedIpv6 = AtomicLong(0)
+    private val unsupportedMalformed = AtomicLong(0)
+    private val retryRecoveries = AtomicLong(0)
+    private val resolverAttemptTimeouts = AtomicLong(0)
+    private val ignoredResponses = AtomicLong(0)
+
+    private val failedDomainLock = Any()
+    private val failedDomainCounts = linkedMapOf<String, Long>()
+
+    fun reset() {
+        unsupportedIpv4TcpDns.set(0)
+        unsupportedIpv4UdpOther.set(0)
+        unsupportedIpv4Other.set(0)
+        unsupportedIpv6.set(0)
+        unsupportedMalformed.set(0)
+        retryRecoveries.set(0)
+        resolverAttemptTimeouts.set(0)
+        ignoredResponses.set(0)
+        synchronized(failedDomainLock) { failedDomainCounts.clear() }
+    }
+
+    fun recordUnsupported(packet: ByteArray, length: Int) {
+        when (classifyUnsupported(packet, length)) {
+            UnsupportedKind.IPV4_TCP_DNS -> unsupportedIpv4TcpDns.incrementAndGet()
+            UnsupportedKind.IPV4_UDP_OTHER -> unsupportedIpv4UdpOther.incrementAndGet()
+            UnsupportedKind.IPV4_OTHER -> unsupportedIpv4Other.incrementAndGet()
+            UnsupportedKind.IPV6 -> unsupportedIpv6.incrementAndGet()
+            UnsupportedKind.MALFORMED -> unsupportedMalformed.incrementAndGet()
+        }
+    }
+
+    fun recordRetryRecovery() {
+        retryRecoveries.incrementAndGet()
+    }
+
+    fun recordResolverAttemptTimeout() {
+        resolverAttemptTimeouts.incrementAndGet()
+    }
+
+    fun recordIgnoredResponse() {
+        ignoredResponses.incrementAndGet()
+    }
+
+    fun recordFinalFailure(domain: String) {
+        val normalized = domain.trim().trimEnd('.').lowercase(Locale.US)
+        if (normalized.isBlank()) return
+        synchronized(failedDomainLock) {
+            failedDomainCounts[normalized] = (failedDomainCounts[normalized] ?: 0L) + 1L
+            if (failedDomainCounts.size > 20) {
+                val smallest = failedDomainCounts.minByOrNull { it.value }?.key
+                if (smallest != null) failedDomainCounts.remove(smallest)
+            }
+        }
+    }
+
+    fun snapshot(): Snapshot {
+        val failures = synchronized(failedDomainLock) {
+            failedDomainCounts.entries
+                .sortedByDescending { it.value }
+                .take(6)
+                .map { FailedDomain(it.key, it.value) }
+        }
+        return Snapshot(
+            unsupportedIpv4TcpDns = unsupportedIpv4TcpDns.get(),
+            unsupportedIpv4UdpOther = unsupportedIpv4UdpOther.get(),
+            unsupportedIpv4Other = unsupportedIpv4Other.get(),
+            unsupportedIpv6 = unsupportedIpv6.get(),
+            unsupportedMalformed = unsupportedMalformed.get(),
+            retryRecoveries = retryRecoveries.get(),
+            resolverAttemptTimeouts = resolverAttemptTimeouts.get(),
+            ignoredResponses = ignoredResponses.get(),
+            failedDomains = failures
+        )
+    }
+
+    internal fun classifyUnsupported(packet: ByteArray, length: Int): UnsupportedKind {
+        if (length <= 0 || packet.isEmpty()) return UnsupportedKind.MALFORMED
+        val version = (packet[0].toInt() ushr 4) and 0x0F
+        if (version == 6) return UnsupportedKind.IPV6
+        if (version != 4 || length < 20) return UnsupportedKind.MALFORMED
+
+        val headerLength = (packet[0].toInt() and 0x0F) * 4
+        if (headerLength < 20 || length < headerLength) return UnsupportedKind.MALFORMED
+
+        return when (packet[9].toInt() and 0xFF) {
+            6 -> {
+                if (length < headerLength + 4) UnsupportedKind.MALFORMED
+                else {
+                    val destinationPort = u16(packet, headerLength + 2)
+                    if (destinationPort == 53) UnsupportedKind.IPV4_TCP_DNS
+                    else UnsupportedKind.IPV4_OTHER
+                }
+            }
+            17 -> {
+                if (length < headerLength + 8) UnsupportedKind.MALFORMED
+                else {
+                    val destinationPort = u16(packet, headerLength + 2)
+                    if (destinationPort == 53) UnsupportedKind.MALFORMED
+                    else UnsupportedKind.IPV4_UDP_OTHER
+                }
+            }
+            else -> UnsupportedKind.IPV4_OTHER
+        }
+    }
+
+    internal enum class UnsupportedKind {
+        IPV4_TCP_DNS,
+        IPV4_UDP_OTHER,
+        IPV4_OTHER,
+        IPV6,
+        MALFORMED
+    }
+
+    private fun u16(bytes: ByteArray, offset: Int): Int =
+        ((bytes[offset].toInt() and 0xFF) shl 8) or
+            (bytes[offset + 1].toInt() and 0xFF)
+}
