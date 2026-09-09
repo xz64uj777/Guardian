@@ -1,6 +1,7 @@
 package com.guardianlayer.app.firewall
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TrackerShieldDiagnosticsTest {
@@ -77,6 +78,28 @@ class TrackerShieldDiagnosticsTest {
             TrackerShieldDiagnostics.UnsupportedKind.MALFORMED,
             TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
         )
+    }
+
+    @Test
+    fun recordsBoundedEndpointMetadataWithoutPayload() {
+        TrackerShieldDiagnostics.reset()
+        val packet = ipv4Packet(protocol = 6, destinationPort = 443).apply {
+            this[16] = 1
+            this[17] = 2
+            this[18] = 3
+            this[19] = 4
+        }
+
+        TrackerShieldDiagnostics.recordUnsupported(packet, packet.size)
+        TrackerShieldDiagnostics.recordUnsupported(packet, packet.size)
+
+        val sample = TrackerShieldDiagnostics.snapshot().unsupportedSamples.single()
+        assertEquals("TCP other", sample.kind)
+        assertEquals("TCP", sample.protocol)
+        assertEquals("1.2.3.4", sample.address)
+        assertEquals(443, sample.port)
+        assertEquals(2L, sample.count)
+        assertTrue(sample.lastSeenAt > 0L)
     }
 
     private fun ipv4Packet(protocol: Int, destinationPort: Int): ByteArray {
