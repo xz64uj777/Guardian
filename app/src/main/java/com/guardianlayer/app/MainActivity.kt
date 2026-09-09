@@ -27,6 +27,7 @@ import com.guardianlayer.app.firewall.FirewallApp
 import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
 import com.guardianlayer.app.firewall.LauncherAppCatalog
+import com.guardianlayer.app.firewall.TrackerShieldDiagnostics
 import com.guardianlayer.app.firewall.TrackerShieldRuleStore
 import com.guardianlayer.app.privacy.InstalledAppRiskAnalyzer
 import java.text.DateFormat
@@ -671,13 +672,14 @@ class MainActivity : AppCompatActivity() {
         val lastSeen = dateTime.format(Date(profile.lastSeenAt))
 
         append("\n\nPRIVACY PROFILE · EXACT HISTORY\n")
-        append("${profile.retainedDecisions} retained DNS decisions · ${profile.blockedDecisions} tracker blocks · ${profile.allowedDecisions} allowed\n")
-        append("${profile.uniqueTrackerDomains} unique tracker domains\n")
+        append("${profile.cumulativeDecisions} cumulative DNS decisions · ${profile.blockedDecisions} tracker blocks · ${profile.allowedDecisions} allowed\n")
+        append("${profile.uniqueTrackerDomains} cumulative tracker domains\n")
+        append("Recent detail window: ${profile.retainedDecisions} decisions · ${profile.retainedBlockedDecisions} blocked · ${profile.retainedAllowedDecisions} allowed\n")
         append("Observed $firstSeen → $lastSeen")
 
         append("\n\nWhat Guardian saw\n")
         if (profile.blockedDecisions == 0L) {
-            append("No classified tracker domains are present in the retained exact history yet.")
+            append("No classified tracker domains are present in the cumulative exact history yet.")
         } else {
             append(
                 "Guardian blocked ${profile.blockedDecisions} classified tracker DNS request(s) across " +
@@ -716,7 +718,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        append("\nStored locally on this device from exact single-app Tracker Shield sessions. Shared multi-app DNS is not added because Guardian will not guess attribution.")
+        append("\nCumulative counters are compact local summaries; recent detail remains bounded. Shared multi-app DNS is not added because Guardian will not guess attribution.")
     }
 
     private fun StringBuilder.appendAppSignals(
@@ -744,11 +746,11 @@ class MainActivity : AppCompatActivity() {
 
         if (profiles.isEmpty()) {
             privacyHistoryView.text =
-                "No exact per-app privacy history yet. Shield one app at a time to build a trustworthy local profile.\n\nHistory is stored only on this device and is bounded."
+                "No exact per-app privacy history yet. Shield one app at a time to build a trustworthy local profile.\n\nHistory is stored only on this device and recent detail is bounded."
             return
         }
 
-        val totalDecisions = profiles.sumOf { it.retainedDecisions }
+        val totalDecisions = profiles.sumOf { it.cumulativeDecisions }
         val totalBlocks = profiles.sumOf { it.blockedDecisions }
         val latestSeen = profiles.maxOf { it.lastSeenAt }
         val latestText = DateFormat.getDateTimeInstance(
@@ -757,15 +759,15 @@ class MainActivity : AppCompatActivity() {
         ).format(Date(latestSeen))
 
         val appLines = profiles.take(5).joinToString("\n") { profile ->
-            "• ${profile.appLabel} · ${profile.blockedDecisions} blocks · ${profile.uniqueTrackerDomains} tracker domains"
+            "• ${profile.appLabel} · ${profile.blockedDecisions} cumulative blocks · ${profile.uniqueTrackerDomains} tracker domains"
         }
 
         privacyHistoryView.text = buildString {
-            append("${profiles.size} app profile(s) · $totalDecisions retained DNS decisions · $totalBlocks tracker blocks")
+            append("${profiles.size} app profile(s) · $totalDecisions cumulative exact DNS decisions · $totalBlocks tracker blocks")
             append("\nLatest exact activity: $latestText")
             append("\n\nProfiles\n$appLines")
             append("\n\nTap an app below and expand TRAFFIC for its detailed Privacy Profile.")
-            append("\n\nSaved locally on this device. Guardian does not add shared-attribution sessions to these profiles.")
+            append("\n\nSaved locally on this device. Recent detail is bounded, but cumulative counters no longer decrease when old rows age out. Shared-attribution sessions are excluded.")
             if (shieldActive) append("\n\nStop Tracker Shield before clearing saved history.")
         }
     }
@@ -790,7 +792,7 @@ class MainActivity : AppCompatActivity() {
         MaterialAlertDialogBuilder(this)
             .setTitle("Clear saved privacy history?")
             .setMessage(
-                "This deletes Guardian's locally stored exact per-app DNS history. Firewall and Shield rules are kept, and the Guardian Timeline is not erased."
+                "This deletes Guardian's locally stored exact per-app DNS history and cumulative counters. Firewall and Shield rules are kept, and the Guardian Timeline is not erased."
             )
             .setNegativeButton("CANCEL", null)
             .setPositiveButton("CLEAR") { _, _ ->
@@ -799,7 +801,7 @@ class MainActivity : AppCompatActivity() {
                     this,
                     "INFO",
                     "Privacy history cleared",
-                    "Saved exact per-app Tracker Shield history was deleted from this device. Firewall and Tracker Shield rules were left unchanged."
+                    "Saved exact per-app Tracker Shield history and cumulative counters were deleted from this device. Firewall and Tracker Shield rules were left unchanged."
                 )
                 refreshPrivacyHistorySummary()
                 refreshExpandedAppTraffic()
@@ -838,6 +840,7 @@ class MainActivity : AppCompatActivity() {
         val displayMode = if (mode == GuardianVpnService.Mode.OFF) snapshot.sessionMode else mode
 
         if (displayMode == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            val diagnostics = TrackerShieldDiagnostics.snapshot()
             val heading = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
                 "LIVE TRACKER SHIELD"
             } else {
@@ -859,17 +862,31 @@ class MainActivity : AppCompatActivity() {
                     "• ${tracker.domain} · ${tracker.provider} · ×${tracker.count}"
                 }
             }
+            val failedDomains = if (diagnostics.failedDomains.isEmpty()) {
+                "None"
+            } else {
+                diagnostics.failedDomains.joinToString("\n") { failed ->
+                    "• ${failed.domain} · ×${failed.count}"
+                }
+            }
             firewallActivityView.text = buildString {
                 append(heading)
                 append("\n\n")
                 append("${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} tracker requests blocked")
                 append("\n${snapshot.dnsQueriesForwarded} forwarded · ${snapshot.dnsFailures} upstream failures")
                 append("\n${snapshot.dnsUnsupportedPackets} unsupported packets · ${snapshot.uniqueTrackerDomainsBlocked} unique tracker domains blocked")
+                append("\n\nUnsupported packet breakdown\n")
+                append("IPv6 ${diagnostics.unsupportedIpv6} · TCP DNS ${diagnostics.unsupportedIpv4TcpDns}")
+                append("\nOther UDP ${diagnostics.unsupportedIpv4UdpOther} · Other IPv4 ${diagnostics.unsupportedIpv4Other} · malformed ${diagnostics.unsupportedMalformed}")
+                append("\n\nDNS reliability\n")
+                append("Fallback recoveries ${diagnostics.retryRecoveries} · resolver timeouts ${diagnostics.resolverAttemptTimeouts} · stale/malformed responses ignored ${diagnostics.ignoredResponses}")
+                append("\nFinal failed domains\n")
+                append(failedDomains)
                 append("\n\nTop blocked tracker domains\n")
                 append(topBlocked)
                 append("\n\nRecent DNS decisions\n")
                 append(recent)
-                append("\n\nTracker Shield is intentionally DNS-only in this alpha. It does not decrypt HTTPS or encrypted DNS and does not claim to block cached/direct-IP tracker traffic.")
+                append("\n\nUnsupported does not automatically mean a connectivity failure; it means the packet did not fit Guardian's current IPv4/UDP DNS parser. Tracker Shield does not decrypt HTTPS or encrypted DNS and does not claim to block cached/direct-IP tracker traffic.")
             }
             return
         }
