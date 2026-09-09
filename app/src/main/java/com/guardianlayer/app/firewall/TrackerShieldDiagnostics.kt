@@ -21,6 +21,7 @@ object TrackerShieldDiagnostics {
         val unsupportedIpv4UdpOther: Long,
         val unsupportedIpv4Icmp: Long,
         val unsupportedIpv4Fragments: Long,
+        /** Aggregate of all non-DNS IPv4 traffic except UDP-other, kept for compatibility. */
         val unsupportedIpv4Other: Long,
         val unsupportedIpv6: Long,
         val unsupportedMalformed: Long,
@@ -30,10 +31,8 @@ object TrackerShieldDiagnostics {
         val failedDomains: List<FailedDomain>
     ) {
         val unsupportedTotal: Long
-            get() = unsupportedIpv4TcpDns + unsupportedIpv4TcpOther +
-                unsupportedIpv4UdpOther + unsupportedIpv4Icmp +
-                unsupportedIpv4Fragments + unsupportedIpv4Other +
-                unsupportedIpv6 + unsupportedMalformed
+            get() = unsupportedIpv4TcpDns + unsupportedIpv4UdpOther +
+                unsupportedIpv4Other + unsupportedIpv6 + unsupportedMalformed
     }
 
     private val unsupportedIpv4TcpDns = AtomicLong(0)
@@ -69,10 +68,19 @@ object TrackerShieldDiagnostics {
     fun recordUnsupported(packet: ByteArray, length: Int) {
         when (classifyUnsupported(packet, length)) {
             UnsupportedKind.IPV4_TCP_DNS -> unsupportedIpv4TcpDns.incrementAndGet()
-            UnsupportedKind.IPV4_TCP_OTHER -> unsupportedIpv4TcpOther.incrementAndGet()
+            UnsupportedKind.IPV4_TCP_OTHER -> {
+                unsupportedIpv4TcpOther.incrementAndGet()
+                unsupportedIpv4Other.incrementAndGet()
+            }
             UnsupportedKind.IPV4_UDP_OTHER -> unsupportedIpv4UdpOther.incrementAndGet()
-            UnsupportedKind.IPV4_ICMP -> unsupportedIpv4Icmp.incrementAndGet()
-            UnsupportedKind.IPV4_FRAGMENT -> unsupportedIpv4Fragments.incrementAndGet()
+            UnsupportedKind.IPV4_ICMP -> {
+                unsupportedIpv4Icmp.incrementAndGet()
+                unsupportedIpv4Other.incrementAndGet()
+            }
+            UnsupportedKind.IPV4_FRAGMENT -> {
+                unsupportedIpv4Fragments.incrementAndGet()
+                unsupportedIpv4Other.incrementAndGet()
+            }
             UnsupportedKind.IPV4_OTHER -> unsupportedIpv4Other.incrementAndGet()
             UnsupportedKind.IPV6 -> unsupportedIpv6.incrementAndGet()
             UnsupportedKind.MALFORMED -> unsupportedMalformed.incrementAndGet()
