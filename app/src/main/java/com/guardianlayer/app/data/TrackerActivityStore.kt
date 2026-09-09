@@ -8,14 +8,17 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * Bounded, local-only history for DNS decisions that Guardian can attribute to
- * exactly one shielded app. Shared-attribution sessions are intentionally not
- * written here because Guardian will not guess which app owned a request.
+ * Local-only history for DNS decisions that Guardian can attribute to exactly
+ * one shielded app. Recent decision rows are bounded, while compact cumulative
+ * counters are stored separately so totals do not go backwards when old rows
+ * age out. Shared-attribution sessions are never written here.
  */
 object TrackerActivityStore {
     private const val PREFS = "guardian_tracker_activity"
     private const val KEY_ENTRIES = "entries"
+    private const val KEY_LIFETIME = "lifetime_v1"
     private const val MAX_ENTRIES = 300
+    private const val MAX_TRACKER_DOMAINS_PER_APP = 120
     private const val DEDUPE_WINDOW_MS = 1_500L
     private const val PERSIST_DEBOUNCE_MS = 750L
 
@@ -48,6 +51,9 @@ object TrackerActivityStore {
         val packageName: String,
         val appLabel: String,
         val retainedDecisions: Long,
+        val retainedBlockedDecisions: Long,
+        val retainedAllowedDecisions: Long,
+        val cumulativeDecisions: Long,
         val blockedDecisions: Long,
         val allowedDecisions: Long,
         val uniqueTrackerDomains: Int,
@@ -59,8 +65,30 @@ object TrackerActivityStore {
         val recentDecisions: List<Decision>
     )
 
+    private data class LifetimeTracker(
+        val domain: String,
+        val category: String,
+        val provider: String,
+        val count: Long,
+        val lastSeenAt: Long
+    )
+
+    private data class LifetimeAggregate(
+        val packageName: String,
+        val appLabel: String,
+        val totalDecisions: Long,
+        val blockedDecisions: Long,
+        val allowedDecisions: Long,
+        val firstSeenAt: Long,
+        val lastSeenAt: Long,
+        val trackers: MutableMap<String, LifetimeTracker>
+    )
+
     @Volatile
     private var cache: MutableList<Decision>? = null
+
+    @Volatile
+    private var lifetimeCache: MutableMap<String, LifetimeAggregate>? = null
 
     @Volatile
     private var persistScheduled = false
@@ -83,6 +111,7 @@ object TrackerActivityStore {
         if (packageName.isBlank() || domain.isBlank()) return
 
         val entries = entries(context)
+        val lifetime = lifetime(context, entries)
         val normalizedDomain = domain.trim().trimEnd('.').lowercase(Locale.US)
         val duplicateIndex = entries.indexOfFirst { existing ->
             existing.packageName == packageName &&
@@ -116,19 +145,56 @@ object TrackerActivityStore {
 
         entries.add(0, next)
         while (entries.size > MAX_ENTRIES) entries.removeAt(entries.lastIndex)
+
+        val previousAggregate = lifetime[packageName]
+        val trackers = previousAggregate?.trackers?.toMutableMap() ?: linkedMapOf()
+        if (blocked) {
+            val previousTracker = trackers[normalizedDomain]
+            trackers[normalizedDomain] = LifetimeTracker(
+                domain = normalizedDomain,
+                category = category ?: previousTracker?.category ?: "Tracker",
+                provider = provider ?: previousTracker?.provider ?: "Unknown provider",
+                count = (previousTracker?.count ?: 0L) + 1L,
+                lastSeenAt = timestamp
+            )
+            trimTrackerDomains(trackers)
+        }
+
+        lifetime[packageName] = LifetimeAggregate(
+            packageName = packageName,
+            appLabel = appLabel,
+            totalDecisions = (previousAggregate?.totalDecisions ?: 0L) + 1L,
+            blockedDecisions = (previousAggregate?.blockedDecisions ?: 0L) + if (blocked) 1L else 0L,
+            allowedDecisions = (previousAggregate?.allowedDecisions ?: 0L) + if (blocked) 0L else 1L,
+            firstSeenAt = previousAggregate?.firstSeenAt?.takeIf { it > 0L } ?: timestamp,
+            lastSeenAt = timestamp,
+            trackers = trackers
+        )
+
         schedulePersist(context.applicationContext)
     }
 
     @Synchronized
-    fun profile(context: Context, packageName: String): AppProfile? =
-        buildProfile(entries(context).filter { it.packageName == packageName })
+    fun profile(context: Context, packageName: String): AppProfile? {
+        val entries = entries(context)
+        val lifetime = lifetime(context, entries)
+        return buildProfile(
+            entries.filter { it.packageName == packageName },
+            lifetime[packageName]
+        )
+    }
 
     @Synchronized
     fun profiles(context: Context): List<AppProfile> {
-        return entries(context)
-            .groupBy { it.packageName }
-            .values
-            .mapNotNull(::buildProfile)
+        val entries = entries(context)
+        val lifetime = lifetime(context, entries)
+        val grouped = entries.groupBy { it.packageName }
+        val packageNames = linkedSetOf<String>().apply {
+            addAll(lifetime.keys)
+            addAll(grouped.keys)
+        }
+        return packageNames
+            .mapNotNull { packageName -> buildProfile(grouped[packageName].orEmpty(), lifetime[packageName]) }
             .sortedWith(
                 compareByDescending<AppProfile> { it.lastSeenAt }
                     .thenByDescending { it.blockedDecisions }
@@ -137,18 +203,28 @@ object TrackerActivityStore {
 
     @Synchronized
     fun flush(context: Context) {
-        val snapshot = entries(context).toList()
-        persistNow(context.applicationContext, snapshot)
+        val entriesSnapshot = entries(context).toList()
+        val lifetimeSnapshot = copyLifetime(lifetime(context, entries(context)))
+        persistNow(context.applicationContext, entriesSnapshot, lifetimeSnapshot)
         persistScheduled = false
     }
 
-    /** Delete the exact-attribution history for one app while retaining others. */
+    /** Delete the exact-attribution history and cumulative counters for one app. */
     @Synchronized
     fun clearApp(context: Context, packageName: String): Boolean {
         if (packageName.isBlank()) return false
         val entries = entries(context)
-        val removed = entries.removeAll { it.packageName == packageName }
-        if (removed) persistNow(context.applicationContext, entries.toList())
+        val lifetime = lifetime(context, entries)
+        val removedEntries = entries.removeAll { it.packageName == packageName }
+        val removedLifetime = lifetime.remove(packageName) != null
+        val removed = removedEntries || removedLifetime
+        if (removed) {
+            persistNow(
+                context.applicationContext,
+                entries.toList(),
+                copyLifetime(lifetime)
+            )
+        }
         return removed
     }
 
@@ -156,64 +232,68 @@ object TrackerActivityStore {
     @Synchronized
     fun clear(context: Context) {
         cache = mutableListOf()
+        lifetimeCache = linkedMapOf()
         persistScheduled = false
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
             .remove(KEY_ENTRIES)
+            .remove(KEY_LIFETIME)
             .apply()
     }
 
-    private fun buildProfile(appEntries: List<Decision>): AppProfile? {
-        if (appEntries.isEmpty()) return null
+    private fun buildProfile(
+        appEntries: List<Decision>,
+        aggregate: LifetimeAggregate?
+    ): AppProfile? {
+        if (appEntries.isEmpty() && aggregate == null) return null
 
         val retained = appEntries.sumOf { it.count }
-        val blocked = appEntries.filter { it.blocked }.sumOf { it.count }
-        val allowed = retained - blocked
-        val trackerEntries = appEntries.filter { it.blocked }
+        val retainedBlocked = appEntries.filter { it.blocked }.sumOf { it.count }
+        val retainedAllowed = retained - retainedBlocked
 
-        val topTrackers = trackerEntries
-            .groupBy { it.domain }
-            .map { (domain, matches) ->
-                val newest = matches.maxByOrNull { it.lastSeenAt } ?: return@map null
-                TrackerStat(
-                    domain = domain,
-                    category = newest.category ?: "Tracker",
-                    provider = newest.provider ?: "Unknown provider",
-                    count = matches.sumOf { it.count },
-                    lastSeenAt = matches.maxOf { it.lastSeenAt }
-                )
-            }
-            .filterNotNull()
+        val effectiveAggregate = aggregate ?: migrateAggregate(appEntries)
+        val trackers = effectiveAggregate.trackers.values.toList()
+
+        val topTrackers = trackers
             .sortedWith(
-                compareByDescending<TrackerStat> { it.count }
+                compareByDescending<LifetimeTracker> { it.count }
                     .thenByDescending { it.lastSeenAt }
             )
             .take(8)
+            .map {
+                TrackerStat(
+                    domain = it.domain,
+                    category = it.category,
+                    provider = it.provider,
+                    count = it.count,
+                    lastSeenAt = it.lastSeenAt
+                )
+            }
 
-        val categories = trackerEntries
-            .mapNotNull { entry -> entry.category?.let { it to entry.count } }
-            .groupBy({ it.first }, { it.second })
-            .map { (name, counts) -> NamedCount(name, counts.sum()) }
+        val categories = trackers
+            .groupBy { it.category }
+            .map { (name, matches) -> NamedCount(name, matches.sumOf { it.count }) }
             .sortedByDescending { it.count }
             .take(6)
 
-        val providers = trackerEntries
-            .mapNotNull { entry -> entry.provider?.let { it to entry.count } }
-            .groupBy({ it.first }, { it.second })
-            .map { (name, counts) -> NamedCount(name, counts.sum()) }
+        val providers = trackers
+            .groupBy { it.provider }
+            .map { (name, matches) -> NamedCount(name, matches.sumOf { it.count }) }
             .sortedByDescending { it.count }
             .take(6)
 
         return AppProfile(
-            packageName = appEntries.first().packageName,
-            appLabel = appEntries.maxByOrNull { it.lastSeenAt }?.appLabel
-                ?: appEntries.first().appLabel,
+            packageName = effectiveAggregate.packageName,
+            appLabel = effectiveAggregate.appLabel,
             retainedDecisions = retained,
-            blockedDecisions = blocked,
-            allowedDecisions = allowed,
-            uniqueTrackerDomains = trackerEntries.map { it.domain }.toSet().size,
-            firstSeenAt = appEntries.minOf { it.firstSeenAt },
-            lastSeenAt = appEntries.maxOf { it.lastSeenAt },
+            retainedBlockedDecisions = retainedBlocked,
+            retainedAllowedDecisions = retainedAllowed,
+            cumulativeDecisions = effectiveAggregate.totalDecisions,
+            blockedDecisions = effectiveAggregate.blockedDecisions,
+            allowedDecisions = effectiveAggregate.allowedDecisions,
+            uniqueTrackerDomains = trackers.size,
+            firstSeenAt = effectiveAggregate.firstSeenAt,
+            lastSeenAt = effectiveAggregate.lastSeenAt,
             topTrackers = topTrackers,
             categories = categories,
             providers = providers,
@@ -224,9 +304,69 @@ object TrackerActivityStore {
     private fun entries(context: Context): MutableList<Decision> {
         cache?.let { return it }
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val loaded = read(prefs.getString(KEY_ENTRIES, null))
+        val loaded = readEntries(prefs.getString(KEY_ENTRIES, null))
         cache = loaded
         return loaded
+    }
+
+    private fun lifetime(
+        context: Context,
+        fallbackEntries: List<Decision>
+    ): MutableMap<String, LifetimeAggregate> {
+        lifetimeCache?.let { return it }
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val raw = prefs.getString(KEY_LIFETIME, null)
+        val loaded = readLifetime(raw)
+        val migrated = if (raw.isNullOrBlank() && loaded.isEmpty() && fallbackEntries.isNotEmpty()) {
+            fallbackEntries
+                .groupBy { it.packageName }
+                .mapValuesTo(linkedMapOf()) { (_, decisions) -> migrateAggregate(decisions) }
+        } else {
+            loaded
+        }
+        lifetimeCache = migrated
+        if (raw.isNullOrBlank() && migrated.isNotEmpty()) {
+            persistNow(context.applicationContext, fallbackEntries.toList(), copyLifetime(migrated))
+        }
+        return migrated
+    }
+
+    private fun migrateAggregate(entries: List<Decision>): LifetimeAggregate {
+        require(entries.isNotEmpty())
+        val newest = entries.maxByOrNull { it.lastSeenAt } ?: entries.first()
+        val trackerMap = linkedMapOf<String, LifetimeTracker>()
+        entries.filter { it.blocked }.groupBy { it.domain }.forEach { (domain, matches) ->
+            val latest = matches.maxByOrNull { it.lastSeenAt } ?: matches.first()
+            trackerMap[domain] = LifetimeTracker(
+                domain = domain,
+                category = latest.category ?: "Tracker",
+                provider = latest.provider ?: "Unknown provider",
+                count = matches.sumOf { it.count },
+                lastSeenAt = matches.maxOf { it.lastSeenAt }
+            )
+        }
+        trimTrackerDomains(trackerMap)
+        val total = entries.sumOf { it.count }
+        val blocked = entries.filter { it.blocked }.sumOf { it.count }
+        return LifetimeAggregate(
+            packageName = newest.packageName,
+            appLabel = newest.appLabel,
+            totalDecisions = total,
+            blockedDecisions = blocked,
+            allowedDecisions = total - blocked,
+            firstSeenAt = entries.minOf { it.firstSeenAt },
+            lastSeenAt = entries.maxOf { it.lastSeenAt },
+            trackers = trackerMap
+        )
+    }
+
+    private fun trimTrackerDomains(trackers: MutableMap<String, LifetimeTracker>) {
+        while (trackers.size > MAX_TRACKER_DOMAINS_PER_APP) {
+            val victim = trackers.values.minWithOrNull(
+                compareBy<LifetimeTracker> { it.count }.thenBy { it.lastSeenAt }
+            ) ?: break
+            trackers.remove(victim.domain)
+        }
     }
 
     private fun schedulePersist(context: Context) {
@@ -234,21 +374,33 @@ object TrackerActivityStore {
         persistScheduled = true
         persistExecutor.schedule(
             {
-                val snapshot = synchronized(this) {
+                val snapshots = synchronized(this) {
                     persistScheduled = false
-                    cache?.toList() ?: emptyList()
+                    val entrySnapshot = cache?.toList() ?: emptyList()
+                    val lifetimeSnapshot = copyLifetime(lifetimeCache.orEmpty())
+                    entrySnapshot to lifetimeSnapshot
                 }
-                persistNow(context, snapshot)
+                persistNow(context, snapshots.first, snapshots.second)
             },
             PERSIST_DEBOUNCE_MS,
             TimeUnit.MILLISECONDS
         )
     }
 
-    private fun persistNow(context: Context, entries: List<Decision>) {
-        val array = JSONArray()
+    private fun copyLifetime(
+        source: Map<String, LifetimeAggregate>
+    ): Map<String, LifetimeAggregate> = source.mapValues { (_, aggregate) ->
+        aggregate.copy(trackers = LinkedHashMap(aggregate.trackers))
+    }
+
+    private fun persistNow(
+        context: Context,
+        entries: List<Decision>,
+        lifetime: Map<String, LifetimeAggregate>
+    ) {
+        val entryArray = JSONArray()
         entries.forEach { entry ->
-            array.put(
+            entryArray.put(
                 JSONObject()
                     .put("firstSeenAt", entry.firstSeenAt)
                     .put("lastSeenAt", entry.lastSeenAt)
@@ -261,13 +413,41 @@ object TrackerActivityStore {
                     .put("count", entry.count)
             )
         }
+
+        val lifetimeArray = JSONArray()
+        lifetime.values.forEach { aggregate ->
+            val trackerArray = JSONArray()
+            aggregate.trackers.values.forEach { tracker ->
+                trackerArray.put(
+                    JSONObject()
+                        .put("domain", tracker.domain)
+                        .put("category", tracker.category)
+                        .put("provider", tracker.provider)
+                        .put("count", tracker.count)
+                        .put("lastSeenAt", tracker.lastSeenAt)
+                )
+            }
+            lifetimeArray.put(
+                JSONObject()
+                    .put("packageName", aggregate.packageName)
+                    .put("appLabel", aggregate.appLabel)
+                    .put("totalDecisions", aggregate.totalDecisions)
+                    .put("blockedDecisions", aggregate.blockedDecisions)
+                    .put("allowedDecisions", aggregate.allowedDecisions)
+                    .put("firstSeenAt", aggregate.firstSeenAt)
+                    .put("lastSeenAt", aggregate.lastSeenAt)
+                    .put("trackers", trackerArray)
+            )
+        }
+
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putString(KEY_ENTRIES, array.toString())
+            .putString(KEY_ENTRIES, entryArray.toString())
+            .putString(KEY_LIFETIME, lifetimeArray.toString())
             .apply()
     }
 
-    private fun read(raw: String?): MutableList<Decision> {
+    private fun readEntries(raw: String?): MutableList<Decision> {
         if (raw.isNullOrBlank()) return mutableListOf()
         return try {
             val array = JSONArray(raw)
@@ -296,6 +476,47 @@ object TrackerActivityStore {
             }.toMutableList()
         } catch (_: Exception) {
             mutableListOf()
+        }
+    }
+
+    private fun readLifetime(raw: String?): MutableMap<String, LifetimeAggregate> {
+        if (raw.isNullOrBlank()) return linkedMapOf()
+        return try {
+            val array = JSONArray(raw)
+            val result = linkedMapOf<String, LifetimeAggregate>()
+            for (index in 0 until array.length()) {
+                val item = array.optJSONObject(index) ?: continue
+                val packageName = item.optString("packageName")
+                if (packageName.isBlank()) continue
+                val trackers = linkedMapOf<String, LifetimeTracker>()
+                val trackerArray = item.optJSONArray("trackers") ?: JSONArray()
+                for (trackerIndex in 0 until trackerArray.length()) {
+                    val tracker = trackerArray.optJSONObject(trackerIndex) ?: continue
+                    val domain = tracker.optString("domain")
+                    if (domain.isBlank()) continue
+                    trackers[domain] = LifetimeTracker(
+                        domain = domain,
+                        category = tracker.optString("category", "Tracker"),
+                        provider = tracker.optString("provider", "Unknown provider"),
+                        count = tracker.optLong("count", 1L).coerceAtLeast(1L),
+                        lastSeenAt = tracker.optLong("lastSeenAt")
+                    )
+                }
+                trimTrackerDomains(trackers)
+                result[packageName] = LifetimeAggregate(
+                    packageName = packageName,
+                    appLabel = item.optString("appLabel", packageName),
+                    totalDecisions = item.optLong("totalDecisions").coerceAtLeast(0L),
+                    blockedDecisions = item.optLong("blockedDecisions").coerceAtLeast(0L),
+                    allowedDecisions = item.optLong("allowedDecisions").coerceAtLeast(0L),
+                    firstSeenAt = item.optLong("firstSeenAt"),
+                    lastSeenAt = item.optLong("lastSeenAt"),
+                    trackers = trackers
+                )
+            }
+            result
+        } catch (_: Exception) {
+            linkedMapOf()
         }
     }
 }
