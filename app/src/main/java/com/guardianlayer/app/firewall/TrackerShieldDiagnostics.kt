@@ -17,7 +17,10 @@ object TrackerShieldDiagnostics {
 
     data class Snapshot(
         val unsupportedIpv4TcpDns: Long,
+        val unsupportedIpv4TcpOther: Long,
         val unsupportedIpv4UdpOther: Long,
+        val unsupportedIpv4Icmp: Long,
+        val unsupportedIpv4Fragments: Long,
         val unsupportedIpv4Other: Long,
         val unsupportedIpv6: Long,
         val unsupportedMalformed: Long,
@@ -27,12 +30,17 @@ object TrackerShieldDiagnostics {
         val failedDomains: List<FailedDomain>
     ) {
         val unsupportedTotal: Long
-            get() = unsupportedIpv4TcpDns + unsupportedIpv4UdpOther +
-                unsupportedIpv4Other + unsupportedIpv6 + unsupportedMalformed
+            get() = unsupportedIpv4TcpDns + unsupportedIpv4TcpOther +
+                unsupportedIpv4UdpOther + unsupportedIpv4Icmp +
+                unsupportedIpv4Fragments + unsupportedIpv4Other +
+                unsupportedIpv6 + unsupportedMalformed
     }
 
     private val unsupportedIpv4TcpDns = AtomicLong(0)
+    private val unsupportedIpv4TcpOther = AtomicLong(0)
     private val unsupportedIpv4UdpOther = AtomicLong(0)
+    private val unsupportedIpv4Icmp = AtomicLong(0)
+    private val unsupportedIpv4Fragments = AtomicLong(0)
     private val unsupportedIpv4Other = AtomicLong(0)
     private val unsupportedIpv6 = AtomicLong(0)
     private val unsupportedMalformed = AtomicLong(0)
@@ -45,7 +53,10 @@ object TrackerShieldDiagnostics {
 
     fun reset() {
         unsupportedIpv4TcpDns.set(0)
+        unsupportedIpv4TcpOther.set(0)
         unsupportedIpv4UdpOther.set(0)
+        unsupportedIpv4Icmp.set(0)
+        unsupportedIpv4Fragments.set(0)
         unsupportedIpv4Other.set(0)
         unsupportedIpv6.set(0)
         unsupportedMalformed.set(0)
@@ -58,7 +69,10 @@ object TrackerShieldDiagnostics {
     fun recordUnsupported(packet: ByteArray, length: Int) {
         when (classifyUnsupported(packet, length)) {
             UnsupportedKind.IPV4_TCP_DNS -> unsupportedIpv4TcpDns.incrementAndGet()
+            UnsupportedKind.IPV4_TCP_OTHER -> unsupportedIpv4TcpOther.incrementAndGet()
             UnsupportedKind.IPV4_UDP_OTHER -> unsupportedIpv4UdpOther.incrementAndGet()
+            UnsupportedKind.IPV4_ICMP -> unsupportedIpv4Icmp.incrementAndGet()
+            UnsupportedKind.IPV4_FRAGMENT -> unsupportedIpv4Fragments.incrementAndGet()
             UnsupportedKind.IPV4_OTHER -> unsupportedIpv4Other.incrementAndGet()
             UnsupportedKind.IPV6 -> unsupportedIpv6.incrementAndGet()
             UnsupportedKind.MALFORMED -> unsupportedMalformed.incrementAndGet()
@@ -98,7 +112,10 @@ object TrackerShieldDiagnostics {
         }
         return Snapshot(
             unsupportedIpv4TcpDns = unsupportedIpv4TcpDns.get(),
+            unsupportedIpv4TcpOther = unsupportedIpv4TcpOther.get(),
             unsupportedIpv4UdpOther = unsupportedIpv4UdpOther.get(),
+            unsupportedIpv4Icmp = unsupportedIpv4Icmp.get(),
+            unsupportedIpv4Fragments = unsupportedIpv4Fragments.get(),
             unsupportedIpv4Other = unsupportedIpv4Other.get(),
             unsupportedIpv6 = unsupportedIpv6.get(),
             unsupportedMalformed = unsupportedMalformed.get(),
@@ -118,13 +135,18 @@ object TrackerShieldDiagnostics {
         val headerLength = (packet[0].toInt() and 0x0F) * 4
         if (headerLength < 20 || length < headerLength) return UnsupportedKind.MALFORMED
 
+        // Any non-zero fragment offset or the More Fragments bit means the
+        // transport header may not be safely parseable as a complete DNS packet.
+        val fragmentBits = u16(packet, 6) and 0x3FFF
+        if (fragmentBits != 0) return UnsupportedKind.IPV4_FRAGMENT
+
         return when (packet[9].toInt() and 0xFF) {
             6 -> {
                 if (length < headerLength + 4) UnsupportedKind.MALFORMED
                 else {
                     val destinationPort = u16(packet, headerLength + 2)
                     if (destinationPort == 53) UnsupportedKind.IPV4_TCP_DNS
-                    else UnsupportedKind.IPV4_OTHER
+                    else UnsupportedKind.IPV4_TCP_OTHER
                 }
             }
             17 -> {
@@ -135,13 +157,17 @@ object TrackerShieldDiagnostics {
                     else UnsupportedKind.IPV4_UDP_OTHER
                 }
             }
+            1 -> UnsupportedKind.IPV4_ICMP
             else -> UnsupportedKind.IPV4_OTHER
         }
     }
 
     internal enum class UnsupportedKind {
         IPV4_TCP_DNS,
+        IPV4_TCP_OTHER,
         IPV4_UDP_OTHER,
+        IPV4_ICMP,
+        IPV4_FRAGMENT,
         IPV4_OTHER,
         IPV6,
         MALFORMED
