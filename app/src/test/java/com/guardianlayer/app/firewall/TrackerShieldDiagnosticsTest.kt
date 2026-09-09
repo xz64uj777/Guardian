@@ -15,10 +15,47 @@ class TrackerShieldDiagnosticsTest {
     }
 
     @Test
+    fun classifiesIpv4TcpOther() {
+        val packet = ipv4Packet(protocol = 6, destinationPort = 443)
+        assertEquals(
+            TrackerShieldDiagnostics.UnsupportedKind.IPV4_TCP_OTHER,
+            TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
+        )
+    }
+
+    @Test
     fun classifiesIpv4UdpOther() {
         val packet = ipv4Packet(protocol = 17, destinationPort = 443)
         assertEquals(
             TrackerShieldDiagnostics.UnsupportedKind.IPV4_UDP_OTHER,
+            TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
+        )
+    }
+
+    @Test
+    fun classifiesIpv4Icmp() {
+        val packet = ipv4Packet(protocol = 1, destinationPort = 0)
+        assertEquals(
+            TrackerShieldDiagnostics.UnsupportedKind.IPV4_ICMP,
+            TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
+        )
+    }
+
+    @Test
+    fun classifiesIpv4Fragment() {
+        val packet = ipv4Packet(protocol = 17, destinationPort = 53)
+        packet[6] = 0x20
+        assertEquals(
+            TrackerShieldDiagnostics.UnsupportedKind.IPV4_FRAGMENT,
+            TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
+        )
+    }
+
+    @Test
+    fun classifiesIpv4OtherProtocol() {
+        val packet = ipv4Packet(protocol = 47, destinationPort = 0)
+        assertEquals(
+            TrackerShieldDiagnostics.UnsupportedKind.IPV4_OTHER,
             TrackerShieldDiagnostics.classifyUnsupported(packet, packet.size)
         )
     }
