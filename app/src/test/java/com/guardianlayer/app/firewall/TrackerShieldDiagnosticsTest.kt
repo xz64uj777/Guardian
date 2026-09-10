@@ -102,6 +102,30 @@ class TrackerShieldDiagnosticsTest {
         assertTrue(sample.lastSeenAt > 0L)
     }
 
+    @Test
+    fun explainsVirtualDnsPort853AsPrivateDnsDotAttempt() {
+        assertEquals(
+            "Private DNS/DoT attempt to Guardian",
+            TrackerShieldDiagnostics.sampleKindLabel(
+                TrackerShieldDiagnostics.UnsupportedKind.IPV4_TCP_OTHER,
+                "10.77.0.2",
+                853
+            )
+        )
+    }
+
+    @Test
+    fun explainsFf02Ipv6AsLinkLocalControl() {
+        assertEquals(
+            "IPv6 link-local control",
+            TrackerShieldDiagnostics.sampleKindLabel(
+                TrackerShieldDiagnostics.UnsupportedKind.IPV6,
+                "ff02:0:0:0:0:0:0:2",
+                null
+            )
+        )
+    }
+
     private fun ipv4Packet(protocol: Int, destinationPort: Int): ByteArray {
         val packet = ByteArray(40)
         packet[0] = 0x45
