@@ -163,24 +163,15 @@ object TrackerShieldDiagnostics {
 
     private fun recordUnsupportedSample(kind: UnsupportedKind, packet: ByteArray, length: Int) {
         val destination = PacketInspector.inspect(packet, length)
-        val kindLabel = when (kind) {
-            UnsupportedKind.IPV4_TCP_DNS -> "TCP DNS"
-            UnsupportedKind.IPV4_TCP_OTHER -> "TCP other"
-            UnsupportedKind.IPV4_UDP_OTHER -> "UDP other"
-            UnsupportedKind.IPV4_ICMP -> "ICMP"
-            UnsupportedKind.IPV4_FRAGMENT -> "IPv4 fragment"
-            UnsupportedKind.IPV4_OTHER -> "Other IPv4"
-            UnsupportedKind.IPV6 -> "IPv6"
-            UnsupportedKind.MALFORMED -> "Malformed"
-        }
+        val address = destination?.address ?: "unparsed"
+        val port = destination?.port
+        val kindLabel = sampleKindLabel(kind, address, port)
         val protocol = destination?.protocol ?: when (kind) {
             UnsupportedKind.IPV4_TCP_DNS, UnsupportedKind.IPV4_TCP_OTHER -> "TCP"
             UnsupportedKind.IPV4_UDP_OTHER -> "UDP"
             UnsupportedKind.IPV4_ICMP -> "ICMP"
             else -> "OTHER"
         }
-        val address = destination?.address ?: "unparsed"
-        val port = destination?.port
         val key = "$kindLabel|$protocol|$address|${port ?: -1}"
         val now = System.currentTimeMillis()
 
@@ -198,6 +189,25 @@ object TrackerShieldDiagnostics {
                 val oldest = unsupportedSampleCounts.minByOrNull { it.value.lastSeenAt }?.key ?: break
                 unsupportedSampleCounts.remove(oldest)
             }
+        }
+    }
+
+    internal fun sampleKindLabel(kind: UnsupportedKind, address: String?, port: Int?): String {
+        val normalizedAddress = address?.trim()?.lowercase(Locale.US).orEmpty()
+        return when {
+            kind == UnsupportedKind.IPV4_TCP_OTHER &&
+                normalizedAddress == "10.77.0.2" && port == 853 ->
+                "Private DNS/DoT attempt to Guardian"
+            kind == UnsupportedKind.IPV6 && normalizedAddress.startsWith("ff02:") ->
+                "IPv6 link-local control"
+            kind == UnsupportedKind.IPV4_TCP_DNS -> "TCP DNS"
+            kind == UnsupportedKind.IPV4_TCP_OTHER -> "TCP other"
+            kind == UnsupportedKind.IPV4_UDP_OTHER -> "UDP other"
+            kind == UnsupportedKind.IPV4_ICMP -> "ICMP"
+            kind == UnsupportedKind.IPV4_FRAGMENT -> "IPv4 fragment"
+            kind == UnsupportedKind.IPV4_OTHER -> "Other IPv4"
+            kind == UnsupportedKind.IPV6 -> "IPv6"
+            else -> "Malformed"
         }
     }
 
