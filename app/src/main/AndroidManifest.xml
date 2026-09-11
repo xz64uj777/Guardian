@@ -24,8 +24,9 @@
         android:usesCleartextTraffic="false">
 
         <activity
-            android:name=".MainActivity"
-            android:exported="true">
+            android:name=".HomeDashboardActivity"
+            android:exported="true"
+            android:label="Guardian">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -33,14 +34,13 @@
         </activity>
 
         <activity
+            android:name=".MainActivity"
+            android:exported="false" />
+
+        <activity
             android:name=".PrivacyProfilesActivity"
-            android:exported="true"
-            android:label="Guardian Privacy">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
+            android:exported="false"
+            android:label="Guardian Privacy" />
 
         <service
             android:name=".firewall.GuardianVpnService"
