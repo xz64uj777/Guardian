@@ -32,7 +32,7 @@ class PrivacyProfilesActivity : AppCompatActivity() {
 
     private lateinit var root: LinearLayout
 
-    private val background = Color.rgb(13, 14, 19)
+    private val pageBackground = Color.rgb(13, 14, 19)
     private val surface = Color.rgb(25, 27, 34)
     private val surfaceRaised = Color.rgb(32, 34, 43)
     private val violet = Color.rgb(164, 151, 255)
@@ -55,7 +55,7 @@ class PrivacyProfilesActivity : AppCompatActivity() {
 
     private fun buildUi(): ScrollView {
         val scroll = ScrollView(this).apply {
-            setBackgroundColor(background)
+            setBackgroundColor(pageBackground)
             isFillViewport = true
         }
         root = LinearLayout(this).apply {
