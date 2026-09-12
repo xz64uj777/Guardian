@@ -13,6 +13,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import com.google.android.material.button.MaterialButton
 import com.guardianlayer.app.data.TrackerActivityStore
 import com.guardianlayer.app.firewall.FirewallRuleStore
@@ -95,10 +96,45 @@ class HomeDashboardActivity : AppCompatActivity() {
         val prepare = VpnService.prepare(this)
         if (prepare != null) { pendingAction = action; @Suppress("DEPRECATION") startActivityForResult(prepare, 901) } else startVpn(action)
     }
+
     @Deprecated("Deprecated in Android API; retained for VpnService consent compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) { super.onActivityResult(requestCode, resultCode, data); if (requestCode == 901) { val action = pendingAction; pendingAction = null; if (resultCode == RESULT_OK && action != null) startVpn(action) } }
-    private fun startVpn(action: String) { startService(Intent(this, GuardianVpnService::class.java).setAction(action)); Toast.makeText(this, "Guardian protection starting", Toast.LENGTH_SHORT).show(); root.postDelayed({ render() }, 500) }
-    private fun stopVpn() { startService(Intent(this, GuardianVpnService::class.java).setAction(GuardianVpnService.ACTION_STOP)); Toast.makeText(this, "Guardian protection stopped", Toast.LENGTH_SHORT).show(); root.postDelayed({ render() }, 500) }
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 901) {
+            val action = pendingAction
+            pendingAction = null
+            if (resultCode == RESULT_OK && action != null) startVpn(action)
+        }
+    }
+
+    private fun startVpn(action: String) {
+        ContextCompat.startForegroundService(this, Intent(this, GuardianVpnService::class.java).setAction(action))
+        Toast.makeText(this, "Guardian protection starting", Toast.LENGTH_SHORT).show()
+        val expected = when (action) {
+            GuardianVpnService.ACTION_TRACKER_SHIELD -> GuardianVpnService.Mode.TRACKER_SHIELD
+            GuardianVpnService.ACTION_FIREWALL -> GuardianVpnService.Mode.FIREWALL
+            GuardianVpnService.ACTION_LOCKDOWN -> GuardianVpnService.Mode.LOCKDOWN
+            else -> GuardianVpnService.Mode.OFF
+        }
+        refreshUntilMode(expected)
+    }
+
+    private fun stopVpn() {
+        startService(Intent(this, GuardianVpnService::class.java).setAction(GuardianVpnService.ACTION_STOP))
+        Toast.makeText(this, "Guardian protection stopping", Toast.LENGTH_SHORT).show()
+        refreshUntilMode(GuardianVpnService.Mode.OFF)
+    }
+
+    private fun refreshUntilMode(expected: GuardianVpnService.Mode, attempt: Int = 0) {
+        root.postDelayed({
+            if (isFinishing || isDestroyed) return@postDelayed
+            render()
+            if (GuardianVpnService.currentMode() != expected && attempt < 12) {
+                refreshUntilMode(expected, attempt + 1)
+            }
+        }, if (attempt == 0) 180L else 250L)
+    }
+
     private fun openControls() = startActivity(Intent(this, MainActivity::class.java))
 
     private fun hero(title: String, body: String, accent: Int) = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(18), dp(18), dp(18), dp(18)); background = rounded(surface, 20f, accent); addView(text("PROTECTION STATUS", 11f, accent, Typeface.BOLD)); addView(text(title, 23f, primary, Typeface.BOLD).top(dp(8))); addView(text(body, 13f, secondary, Typeface.NORMAL).top(dp(8))) }
