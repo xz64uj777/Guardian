@@ -20,6 +20,7 @@ import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
 import com.guardianlayer.app.firewall.TrackerShieldRuleStore
 import java.text.NumberFormat
+import com.guardianlayer.app.privacy.GuardianInsights
 
 class HomeDashboardActivity : AppCompatActivity() {
     private val page = Color.rgb(11, 12, 17)
@@ -37,12 +38,34 @@ class HomeDashboardActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         title = "Guardian"
+        pendingAction = savedInstanceState?.getString("pendingAction")
         setContentView(buildUi())
+    }
+
+    private val statusHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lastMode = GuardianVpnService.Mode.OFF
+    private val statusRefresh = object : Runnable {
+        override fun run() {
+            val current = GuardianVpnService.currentMode()
+            if (current != lastMode) render()
+            statusHandler.postDelayed(this, 750L)
+        }
+    }
+
+    override fun onPause() {
+        statusHandler.removeCallbacks(statusRefresh)
+        super.onPause()
     }
 
     override fun onResume() {
         super.onResume()
         render()
+        statusHandler.post(statusRefresh)
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putString("pendingAction", pendingAction)
+        super.onSaveInstanceState(outState)
     }
 
     private fun buildUi(): ScrollView = ScrollView(this).apply {
@@ -50,7 +73,8 @@ class HomeDashboardActivity : AppCompatActivity() {
         isFillViewport = true
         root = LinearLayout(this@HomeDashboardActivity).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(18), dp(22), dp(18), dp(34))
+            val side = if (resources.configuration.screenWidthDp >= 600) dp(48) else dp(18)
+            setPadding(side, dp(22), side, dp(34))
         }
         addView(root, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
@@ -58,12 +82,20 @@ class HomeDashboardActivity : AppCompatActivity() {
     private fun render() {
         root.removeAllViews()
         val mode = GuardianVpnService.currentMode()
+        lastMode = mode
         val snapshot = GuardianVpnService.trafficSnapshot()
         val profiles = TrackerActivityStore.profiles(this)
         val totalBlocks = profiles.sumOf { it.blockedDecisions }
         val totalDecisions = profiles.sumOf { it.cumulativeDecisions }
         val shieldCount = TrackerShieldRuleStore.protectedCount(this)
         val firewallCount = FirewallRuleStore.blockedCount(this)
+
+        val activeRules = GuardianVpnService.activeRulePackages()
+        val pendingRules = when (mode) {
+            GuardianVpnService.Mode.FIREWALL -> activeRules != FirewallRuleStore.blockedPackages(this)
+            GuardianVpnService.Mode.TRACKER_SHIELD -> activeRules != TrackerShieldRuleStore.protectedPackages(this)
+            else -> false
+        }
 
         root.addView(text("GUARDIAN", 32f, primary, Typeface.BOLD))
         root.addView(text("Your phone. Your traffic. Your rules.", 14f, secondary, Typeface.NORMAL).top(dp(4)))
@@ -76,8 +108,8 @@ class HomeDashboardActivity : AppCompatActivity() {
         }
         val stateBody = when (mode) {
             GuardianVpnService.Mode.LOCKDOWN -> "Emergency network protection is active. Tap Restore Network when you're ready."
-            GuardianVpnService.Mode.FIREWALL -> "$firewallCount selected app(s) are being blocked by Guardian."
-            GuardianVpnService.Mode.TRACKER_SHIELD -> "$shieldCount selected app(s) are shielded while normal app traffic stays online."
+            GuardianVpnService.Mode.FIREWALL -> "Smart Firewall is running.${if (pendingRules) " Saved app changes are not active yet. Apply them below." else ""}"
+            GuardianVpnService.Mode.TRACKER_SHIELD -> "Tracker Shield is running.${if (pendingRules) " Saved app changes are not active yet. Apply them below." else ""}"
             else -> "Protection is ready. Start Tracker Shield, Firewall, or Lock Down below."
         }
         val stateColor = when (mode) {
@@ -86,6 +118,18 @@ class HomeDashboardActivity : AppCompatActivity() {
             else -> green
         }
         root.addView(hero(stateTitle, stateBody, stateColor).top(dp(22)))
+
+        if (pendingRules) {
+            root.addView(actionCard(
+                "App changes waiting",
+                "Apply restarts the current mode with your saved selection and resets session counters. There may be a brief connection gap. If its selection is empty, that mode stops. Other modes will not start automatically.",
+                "APPLY TO CURRENT MODE"
+            ) {
+                requestVpnAndStart(if (mode == GuardianVpnService.Mode.FIREWALL)
+                    GuardianVpnService.ACTION_FIREWALL else GuardianVpnService.ACTION_TRACKER_SHIELD)
+            }.top(dp(12)))
+        }
+        root.addView(text("Only one protection mode runs at a time. Starting another replaces the current mode. Guardian is a local VPN; it does not change your public IP or location.", 12f, secondary, Typeface.NORMAL).top(dp(12)))
 
         root.addView(section("PROTECTION CONTROLS").top(dp(24)))
         val shieldReady = shieldCount > 0
@@ -161,6 +205,23 @@ class HomeDashboardActivity : AppCompatActivity() {
             startActivity(Intent(this, PrivacyProfilesActivity::class.java))
         }.top(dp(11)))
 
+        root.addView(MaterialButton(this).apply {
+            text = "REFRESH PRIVACY SUMMARY"
+            setOnClickListener { render() }
+        }.top(dp(10)))
+
+        root.addView(section("SHOULD I CARE?").top(dp(25)))
+        GuardianInsights.summarize(totalDecisions, totalBlocks).forEach { insight ->
+            root.addView(card(insight).top(dp(9)))
+        }
+        val company = profiles.flatMap { it.providers }
+            .groupBy { it.name }
+            .mapValues { (_, entries) -> entries.sumOf { it.count } }
+            .maxByOrNull { it.value }
+        if (company != null) {
+            root.addView(card("Leading company in retained profile summaries: ${company.key}\n${NumberFormat.getIntegerInstance().format(company.value)} blocked DNS requests. This is historical activity, not a current spike or proof of malware. Open Privacy Profiles for evidence.").top(dp(9)))
+        }
+
         root.addView(section("RECENT PROTECTION").top(dp(25)))
         root.addView(card(when {
             snapshot.sessionMode == GuardianVpnService.Mode.TRACKER_SHIELD || mode == GuardianVpnService.Mode.TRACKER_SHIELD -> "Tracker Shield\n${snapshot.dnsQueries} DNS queries · ${snapshot.trackerQueriesBlocked} blocked · ${snapshot.dnsFailures} upstream failures"
@@ -206,8 +267,8 @@ class HomeDashboardActivity : AppCompatActivity() {
         ContextCompat.startForegroundService(this, Intent(this, GuardianVpnService::class.java).setAction(action))
         Toast.makeText(this, "Guardian protection starting", Toast.LENGTH_SHORT).show()
         val expected = when (action) {
-            GuardianVpnService.ACTION_TRACKER_SHIELD -> GuardianVpnService.Mode.TRACKER_SHIELD
-            GuardianVpnService.ACTION_FIREWALL -> GuardianVpnService.Mode.FIREWALL
+            GuardianVpnService.ACTION_TRACKER_SHIELD -> if (TrackerShieldRuleStore.protectedCount(this) == 0) GuardianVpnService.Mode.OFF else GuardianVpnService.Mode.TRACKER_SHIELD
+            GuardianVpnService.ACTION_FIREWALL -> if (FirewallRuleStore.blockedCount(this) == 0) GuardianVpnService.Mode.OFF else GuardianVpnService.Mode.FIREWALL
             GuardianVpnService.ACTION_LOCKDOWN -> GuardianVpnService.Mode.LOCKDOWN
             else -> GuardianVpnService.Mode.OFF
         }

@@ -12,7 +12,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import androidx.core.app.NotificationCompat
-import com.guardianlayer.app.MainActivity
+import com.guardianlayer.app.HomeDashboardActivity
 import com.guardianlayer.app.R
 import com.guardianlayer.app.data.GuardianEventStore
 import com.guardianlayer.app.data.GuardianStateStore
@@ -121,6 +121,12 @@ class GuardianVpnService : VpnService() {
 
         fun isRunning(): Boolean = mode != Mode.OFF
         fun currentMode(): Mode = mode
+
+        @Volatile
+        private var activeRules: Set<String> = emptySet()
+
+        /** Selection captured when the current VPN was established, not pending edits. */
+        fun activeRulePackages(): Set<String> = activeRules.toSet()
 
         fun trafficSnapshot(): TrafficSnapshot {
             val snapshotData = synchronized(trafficLock) {
@@ -388,6 +394,7 @@ class GuardianVpnService : VpnService() {
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
         activeVpnPackages = effectivePackages.toList()
         trafficSourcePrefix = trafficSourceLabel(targetMode, effectivePackages)
+        activeRules = blockedPackages.toSet()
         mode = targetMode
         GuardianStateStore.setLockdownActive(this, targetMode == Mode.LOCKDOWN)
 
@@ -473,6 +480,7 @@ class GuardianVpnService : VpnService() {
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
         activeVpnPackages = effectivePackages.toList()
         trafficSourcePrefix = trafficSourceLabel(Mode.TRACKER_SHIELD, effectivePackages)
+        activeRules = protectedPackages.toSet()
         mode = Mode.TRACKER_SHIELD
         GuardianStateStore.setLockdownActive(this, false)
 
@@ -918,7 +926,7 @@ class GuardianVpnService : VpnService() {
         val openApp = PendingIntent.getActivity(
             this,
             0,
-            Intent(this, MainActivity::class.java),
+            Intent(this, HomeDashboardActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val stopIntent = PendingIntent.getService(
