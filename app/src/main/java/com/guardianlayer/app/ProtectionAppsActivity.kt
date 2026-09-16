@@ -4,6 +4,8 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.EditText
@@ -46,6 +48,17 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var loading = true
     private var preferredMode: String = MODE_FIREWALL
     private var expandedPackageName: String? = null
+    private var baselineDecisions = 0L
+    private var baselineBlocked = 0L
+    private val liveHandler = Handler(Looper.getMainLooper())
+    private val liveRefresh = object : Runnable {
+        override fun run() {
+            if (!isFinishing && expandedPackageName != null && ::list.isInitialized && !loading) {
+                renderApps()
+                liveHandler.postDelayed(this, 2_000L)
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,6 +66,8 @@ class ProtectionAppsActivity : AppCompatActivity() {
         query = savedInstanceState?.getString("query").orEmpty()
         selectedOnly = savedInstanceState?.getBoolean("selectedOnly") ?: false
         expandedPackageName = savedInstanceState?.getString("expandedPackageName")
+        baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
+        baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
         title = "Guardian Protection Apps"
         setContentView(buildUi())
         loadApps()
@@ -62,65 +77,71 @@ class ProtectionAppsActivity : AppCompatActivity() {
         super.onResume()
         if (::summary.isInitialized) refreshSummary()
         if (::list.isInitialized && !loading) renderApps()
+        restartLiveRefresh()
+    }
+
+    override fun onPause() {
+        liveHandler.removeCallbacks(liveRefresh)
+        super.onPause()
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         outState.putString("query", query)
         outState.putBoolean("selectedOnly", selectedOnly)
         outState.putString("expandedPackageName", expandedPackageName)
+        outState.putLong("baselineDecisions", baselineDecisions)
+        outState.putLong("baselineBlocked", baselineBlocked)
         super.onSaveInstanceState(outState)
     }
 
-    private fun buildUi(): ScrollView {
-        return ScrollView(this).apply {
-            setBackgroundColor(page)
-            isFillViewport = true
-            addView(LinearLayout(this@ProtectionAppsActivity).apply {
-                orientation = LinearLayout.VERTICAL
-                val side = if (resources.configuration.screenWidthDp >= 600) dp(48) else dp(18)
-                setPadding(side, dp(22), side, dp(34))
-                addView(text("PROTECTION APPS", 28f, primary, Typeface.BOLD))
-                addView(text("Choose what Guardian should block or shield, then expand an app to see the traffic Guardian can attribute to it.", 14f, secondary, Typeface.NORMAL).top(dp(4)))
+    private fun buildUi(): ScrollView = ScrollView(this).apply {
+        setBackgroundColor(page)
+        isFillViewport = true
+        addView(LinearLayout(this@ProtectionAppsActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            val side = if (resources.configuration.screenWidthDp >= 600) dp(48) else dp(18)
+            setPadding(side, dp(22), side, dp(34))
+            addView(text("PROTECTION APPS", 28f, primary, Typeface.BOLD))
+            addView(text("Choose what Guardian should block or shield, then expand an app to watch the traffic Guardian can attribute to it.", 14f, secondary, Typeface.NORMAL).top(dp(4)))
 
-                summary = text("", 14f, primary, Typeface.BOLD).apply {
-                    setPadding(dp(16), dp(15), dp(16), dp(15))
-                    background = rounded(surface, 17f)
+            summary = text("", 14f, primary, Typeface.BOLD).apply {
+                setPadding(dp(16), dp(15), dp(16), dp(15))
+                background = rounded(surface, 17f)
+            }
+            addView(summary.top(dp(20)))
+
+            addView(text("BLOCK cuts an app's network access. SHIELD keeps it online and filters visible tracker DNS. ALLOW removes either saved rule. Exact app traffic history is shown only when Guardian can attribute it confidently.", 12f, secondary, Typeface.NORMAL).top(dp(10)))
+
+            addView(EditText(this@ProtectionAppsActivity).apply {
+                hint = "Search app name or package"
+                contentDescription = "Search protection apps"
+                setTextColor(primary)
+                setHintTextColor(secondary)
+                setSingleLine(true)
+                setText(query)
+                doAfterTextChanged {
+                    query = it?.toString().orEmpty()
+                    if (::list.isInitialized) renderApps()
                 }
-                addView(summary.top(dp(20)))
-
-                addView(text("BLOCK cuts an app's network access. SHIELD keeps it online and filters visible tracker DNS. ALLOW removes either saved rule. Exact app traffic history is shown only when Guardian can attribute it confidently.", 12f, secondary, Typeface.NORMAL).top(dp(10)))
-
-                addView(EditText(this@ProtectionAppsActivity).apply {
-                    hint = "Search app name or package"
-                    contentDescription = "Search protection apps"
-                    setTextColor(primary)
-                    setHintTextColor(secondary)
-                    setSingleLine(true)
-                    setText(query)
-                    doAfterTextChanged {
-                        query = it?.toString().orEmpty()
-                        if (::list.isInitialized) renderApps()
-                    }
-                }.top(dp(12)))
-                addView(MaterialButton(this@ProtectionAppsActivity).apply {
+            }.top(dp(12)))
+            addView(MaterialButton(this@ProtectionAppsActivity).apply {
+                text = if (selectedOnly) "SHOW ALL APPS" else "SHOW SELECTED APPS"
+                setOnClickListener {
+                    selectedOnly = !selectedOnly
                     text = if (selectedOnly) "SHOW ALL APPS" else "SHOW SELECTED APPS"
-                    setOnClickListener {
-                        selectedOnly = !selectedOnly
-                        text = if (selectedOnly) "SHOW ALL APPS" else "SHOW SELECTED APPS"
-                        renderApps()
-                    }
-                }.top(dp(6)))
+                    renderApps()
+                }
+            }.top(dp(6)))
 
-                list = LinearLayout(this@ProtectionAppsActivity).apply { orientation = LinearLayout.VERTICAL }
-                addView(list.top(dp(18)))
+            list = LinearLayout(this@ProtectionAppsActivity).apply { orientation = LinearLayout.VERTICAL }
+            addView(list.top(dp(18)))
 
-                addView(MaterialButton(this@ProtectionAppsActivity).apply {
-                    text = "DONE"
-                    minHeight = dp(48)
-                    setOnClickListener { finish() }
-                }.top(dp(18)))
-            }, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        }
+            addView(MaterialButton(this@ProtectionAppsActivity).apply {
+                text = "DONE"
+                minHeight = dp(48)
+                setOnClickListener { finish() }
+            }.top(dp(18)))
+        }, ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
     }
 
     private fun loadApps() {
@@ -138,8 +159,14 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     list.addView(text("Could not load apps. Reopen this screen to retry; your saved rules are unchanged.", 14f, secondary, Typeface.NORMAL))
                 }
                 refreshSummary()
+                restartLiveRefresh()
             }
         }.start()
+    }
+
+    private fun restartLiveRefresh() {
+        liveHandler.removeCallbacks(liveRefresh)
+        if (expandedPackageName != null && !loading) liveHandler.postDelayed(liveRefresh, 2_000L)
     }
 
     private fun renderApps() {
@@ -156,12 +183,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
             list.addView(text("No apps match this view. Try another search or show all apps.", 14f, secondary, Typeface.NORMAL))
             return
         }
-        val columns = if (
-            expandedPackageName == null &&
-            resources.configuration.screenWidthDp >= 600 &&
-            resources.configuration.fontScale <= 1.3f
-        ) 2 else 1
-
+        val columns = if (expandedPackageName == null && resources.configuration.screenWidthDp >= 600 && resources.configuration.fontScale <= 1.3f) 2 else 1
         visible.chunked(columns).forEach { group ->
             val band = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
             group.forEachIndexed { index, app ->
@@ -184,17 +206,12 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         val name = text(app.label, 16f, primary, Typeface.BOLD)
         val pkg = text(app.packageName, 10f, secondary, Typeface.NORMAL).top(dp(2))
-        val buttons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
-        }
+        val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val block = MaterialButton(this).apply { minWidth = 0; minimumWidth = 0; textSize = 11f }
         val shield = MaterialButton(this).apply { minWidth = 0; minimumWidth = 0; textSize = 11f }
         val details = MaterialButton(this).apply {
-            minWidth = 0
-            minimumWidth = 0
-            textSize = 11f
-            text = if (expandedPackageName == app.packageName) "HIDE ACTIVITY" else "VIEW ACTIVITY"
+            minWidth = 0; minimumWidth = 0; textSize = 11f
+            text = if (expandedPackageName == app.packageName) "HIDE LIVE ACTIVITY" else "VIEW LIVE ACTIVITY"
         }
 
         fun refreshButtons() {
@@ -210,29 +227,32 @@ class ProtectionAppsActivity : AppCompatActivity() {
             val next = !FirewallRuleStore.isBlocked(this, app.packageName)
             FirewallRuleStore.setBlocked(this, app.packageName, next)
             if (next) TrackerShieldRuleStore.setProtected(this, app.packageName, false)
-            refreshButtons()
-            refreshSummary()
-            if (selectedOnly) renderApps()
+            refreshButtons(); refreshSummary(); if (selectedOnly) renderApps()
         }
         shield.setOnClickListener {
             val next = !TrackerShieldRuleStore.isProtected(this, app.packageName)
             TrackerShieldRuleStore.setProtected(this, app.packageName, next)
             if (next) FirewallRuleStore.setBlocked(this, app.packageName, false)
-            refreshButtons()
-            refreshSummary()
-            if (selectedOnly) renderApps()
+            refreshButtons(); refreshSummary(); if (selectedOnly) renderApps()
         }
         details.setOnClickListener {
-            expandedPackageName = if (expandedPackageName == app.packageName) null else app.packageName
+            if (expandedPackageName == app.packageName) {
+                expandedPackageName = null
+                baselineDecisions = 0L
+                baselineBlocked = 0L
+            } else {
+                expandedPackageName = app.packageName
+                val profile = TrackerActivityStore.profile(this, app.packageName)
+                baselineDecisions = profile?.cumulativeDecisions ?: 0L
+                baselineBlocked = profile?.blockedDecisions ?: 0L
+            }
             renderApps()
+            restartLiveRefresh()
         }
 
         buttons.addView(block, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         buttons.addView(shield, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
-        row.addView(name)
-        row.addView(pkg)
-        row.addView(buttons.top(dp(9)))
-        row.addView(details.top(dp(4)))
+        row.addView(name); row.addView(pkg); row.addView(buttons.top(dp(9))); row.addView(details.top(dp(4)))
         if (expandedPackageName == app.packageName) row.addView(activityPanel(app).top(dp(8)))
         refreshButtons()
         return row
@@ -245,34 +265,32 @@ class ProtectionAppsActivity : AppCompatActivity() {
             background = rounded(raised, 14f)
         }
         val profile = TrackerActivityStore.profile(this, app.packageName)
-        panel.addView(text("APP ACTIVITY", 12f, violet, Typeface.BOLD))
+        val liveMode = GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
+            TrackerShieldRuleStore.isProtected(this, app.packageName)
+        panel.addView(text(if (liveMode) "APP ACTIVITY  •  LIVE" else "APP ACTIVITY", 12f, if (liveMode) green else violet, Typeface.BOLD))
+        panel.addView(text(
+            if (liveMode) "Updating every 2 seconds while this panel is open." else "Live exact attribution requires Tracker Shield to be running with this app selected.",
+            11f,
+            secondary,
+            Typeface.NORMAL
+        ).top(dp(3)))
 
         if (profile == null || profile.cumulativeDecisions <= 0L) {
-            panel.addView(text(
-                "No exact traffic history is available for ${app.label} yet. Guardian records per-app DNS history only when attribution is confident; an empty history does not mean the app made no network connections.",
-                13f,
-                secondary,
-                Typeface.NORMAL
-            ).top(dp(7)))
-            panel.addView(text(
-                "Try running Tracker Shield with this app selected, use the app normally, then return here.",
-                12f,
-                primary,
-                Typeface.BOLD
-            ).top(dp(8)))
+            panel.addView(text("No exact traffic history is available for ${app.label} yet. Guardian records per-app DNS history only when attribution is confident; an empty history does not mean the app made no network connections.", 13f, secondary, Typeface.NORMAL).top(dp(7)))
+            panel.addView(text("Try running Tracker Shield with this app selected, use the app normally, then keep this panel open.", 12f, primary, Typeface.BOLD).top(dp(8)))
         } else {
             val number = NumberFormat.getIntegerInstance()
+            val deltaDecisions = (profile.cumulativeDecisions - baselineDecisions).coerceAtLeast(0L)
+            val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
+            if (deltaDecisions > 0L) {
+                panel.addView(text("SINCE OPENED  +${number.format(deltaDecisions)} DNS decision(s)  •  +${number.format(deltaBlocked)} blocked", 12f, if (deltaBlocked > 0L) amber else green, Typeface.BOLD).top(dp(8)))
+            }
             val status = when {
                 profile.blockedDecisions == 0L -> "Nothing in Guardian's retained exact history was classified as a tracker. That is reassuring, but it is not a malware verdict."
                 profile.blockedDecisions * 4L < profile.cumulativeDecisions -> "Some tracker activity was seen, but most attributed DNS requests were allowed. This is common in ad-supported or analytics-enabled apps."
                 else -> "Guardian has repeatedly blocked classified tracker requests from this app. Review the companies and domains below; frequent tracking is a privacy concern, not proof of malware."
             }
-            panel.addView(text(
-                "${number.format(profile.cumulativeDecisions)} DNS decisions  •  ${number.format(profile.blockedDecisions)} blocked  •  ${number.format(profile.allowedDecisions)} allowed\n${profile.uniqueTrackerDomains} tracker domain(s) seen  •  last activity ${age(profile.lastSeenAt)}",
-                13f,
-                primary,
-                Typeface.BOLD
-            ).top(dp(7)))
+            panel.addView(text("${number.format(profile.cumulativeDecisions)} DNS decisions  •  ${number.format(profile.blockedDecisions)} blocked  •  ${number.format(profile.allowedDecisions)} allowed\n${profile.uniqueTrackerDomains} tracker domain(s) seen  •  last activity ${age(profile.lastSeenAt)}", 13f, primary, Typeface.BOLD).top(dp(7)))
             panel.addView(text("SHOULD I CARE?", 11f, if (profile.blockedDecisions > 0L) amber else green, Typeface.BOLD).top(dp(11)))
             panel.addView(text(status, 13f, secondary, Typeface.NORMAL).top(dp(4)))
 
@@ -288,13 +306,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 profile.recentDecisions.take(8).forEach { decision ->
                     val state = if (decision.blocked) "BLOCKED" else "ALLOWED"
                     val detail = listOfNotNull(decision.category, decision.provider).distinct().joinToString(" · ")
-                    val suffix = if (detail.isBlank()) "" else "\n  $detail"
-                    panel.addView(text(
-                        "$state  ${decision.domain}  ×${decision.count}$suffix",
-                        12f,
-                        if (decision.blocked) primary else secondary,
-                        if (decision.blocked) Typeface.BOLD else Typeface.NORMAL
-                    ).top(dp(5)))
+                    val purpose = domainPurpose(decision.domain, decision.blocked, decision.category)
+                    val suffix = listOf(detail, purpose).filter { it.isNotBlank() }.joinToString("\n  ")
+                    panel.addView(text("$state  ${decision.domain}  ×${decision.count}${if (suffix.isBlank()) "" else "\n  $suffix"}", 12f, if (decision.blocked) primary else secondary, if (decision.blocked) Typeface.BOLD else Typeface.NORMAL).top(dp(5)))
                 }
             }
         }
@@ -305,18 +319,21 @@ class ProtectionAppsActivity : AppCompatActivity() {
             setOnClickListener {
                 FirewallRuleStore.setBlocked(this@ProtectionAppsActivity, app.packageName, false)
                 TrackerShieldRuleStore.setProtected(this@ProtectionAppsActivity, app.packageName, false)
-                refreshSummary()
-                renderApps()
+                refreshSummary(); renderApps(); restartLiveRefresh()
             }
         }
         panel.addView(allow.top(dp(12)))
-        panel.addView(text(
-            "Rule changes are saved here. If Guardian protection is already running, return Home and use APPLY TO CURRENT MODE when Guardian shows it.",
-            11f,
-            secondary,
-            Typeface.NORMAL
-        ).top(dp(6)))
+        panel.addView(text("Rule changes are saved here. If Guardian protection is already running, return Home and use APPLY TO CURRENT MODE when Guardian shows it.", 11f, secondary, Typeface.NORMAL).top(dp(6)))
         return panel
+    }
+
+    private fun domainPurpose(domain: String, blocked: Boolean, category: String?): String = when {
+        blocked -> category?.let { "Guardian classified this as ${it.lowercase()} traffic." } ?: "Guardian classified this domain as tracker traffic."
+        domain.contains("payments", true) -> "Likely payment/account service traffic."
+        domain.contains("chat", true) || domain.contains("messenger", true) -> "Likely messaging service traffic."
+        domain.contains("video", true) || domain.contains("cdn", true) || domain.contains("fbcdn", true) -> "Likely content delivery/media traffic."
+        domain.contains("graph", true) -> "Likely app/API service traffic."
+        else -> "Allowed service traffic; Guardian has not classified this domain as a tracker."
     }
 
     private fun age(timestamp: Long): String {
@@ -335,8 +352,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val shielded = TrackerShieldRuleStore.protectedCount(this)
         val mode = GuardianVpnService.currentMode()
         val note = when (mode) {
-            GuardianVpnService.Mode.FIREWALL, GuardianVpnService.Mode.TRACKER_SHIELD ->
-                "Saved selection only. Return Home and use APPLY TO CURRENT MODE if shown; changes do not alter the running VPN until applied."
+            GuardianVpnService.Mode.FIREWALL, GuardianVpnService.Mode.TRACKER_SHIELD -> "Saved selection only. Return Home and use APPLY TO CURRENT MODE if shown; changes do not alter the running VPN until applied."
             GuardianVpnService.Mode.LOCKDOWN -> "Lock Down remains active. Changing selections will not restore the network."
             else -> "Selections saved. Return Home to start a protection mode."
         }
@@ -345,17 +361,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
     }
 
     private fun text(value: String, size: Float, color: Int, style: Int) = TextView(this).apply {
-        text = value
-        textSize = size
-        setTextColor(color)
-        setTypeface(typeface, style)
-        setLineSpacing(0f, 1.08f)
+        text = value; textSize = size; setTextColor(color); setTypeface(typeface, style); setLineSpacing(0f, 1.08f)
     }
 
     private fun rounded(fill: Int, radius: Float) = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        setColor(fill)
-        cornerRadius = dp(radius.toInt()).toFloat()
+        shape = GradientDrawable.RECTANGLE; setColor(fill); cornerRadius = dp(radius.toInt()).toFloat()
     }
 
     private fun <T : android.view.View> T.top(px: Int): T {
