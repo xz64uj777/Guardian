@@ -50,6 +50,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var expandedPackageName: String? = null
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
+    private var baselineStartedAt = 0L
     private val liveHandler = Handler(Looper.getMainLooper())
     private val liveRefresh = object : Runnable {
         override fun run() {
@@ -68,6 +69,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         expandedPackageName = savedInstanceState?.getString("expandedPackageName")
         baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
         baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
+        baselineStartedAt = savedInstanceState?.getLong("baselineStartedAt") ?: 0L
         title = "Guardian Protection Apps"
         setContentView(buildUi())
         loadApps()
@@ -91,6 +93,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putString("expandedPackageName", expandedPackageName)
         outState.putLong("baselineDecisions", baselineDecisions)
         outState.putLong("baselineBlocked", baselineBlocked)
+        outState.putLong("baselineStartedAt", baselineStartedAt)
         super.onSaveInstanceState(outState)
     }
 
@@ -153,6 +156,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 loading = false
                 apps = result.getOrDefault(emptyList())
+                if (expandedPackageName != null && baselineStartedAt == 0L) resetLiveWindow(expandedPackageName!!)
                 renderApps()
                 if (result.isFailure) {
                     list.removeAllViews()
@@ -167,6 +171,13 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private fun restartLiveRefresh() {
         liveHandler.removeCallbacks(liveRefresh)
         if (expandedPackageName != null && !loading) liveHandler.postDelayed(liveRefresh, 2_000L)
+    }
+
+    private fun resetLiveWindow(packageName: String) {
+        val profile = TrackerActivityStore.profile(this, packageName)
+        baselineDecisions = profile?.cumulativeDecisions ?: 0L
+        baselineBlocked = profile?.blockedDecisions ?: 0L
+        baselineStartedAt = System.currentTimeMillis()
     }
 
     private fun renderApps() {
@@ -240,11 +251,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 expandedPackageName = null
                 baselineDecisions = 0L
                 baselineBlocked = 0L
+                baselineStartedAt = 0L
             } else {
                 expandedPackageName = app.packageName
-                val profile = TrackerActivityStore.profile(this, app.packageName)
-                baselineDecisions = profile?.cumulativeDecisions ?: 0L
-                baselineBlocked = profile?.blockedDecisions ?: 0L
+                resetLiveWindow(app.packageName)
             }
             renderApps()
             restartLiveRefresh()
@@ -269,7 +279,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
             TrackerShieldRuleStore.isProtected(this, app.packageName)
         panel.addView(text(if (liveMode) "APP ACTIVITY  •  LIVE" else "APP ACTIVITY", 12f, if (liveMode) green else violet, Typeface.BOLD))
         panel.addView(text(
-            if (liveMode) "Updating every 2 seconds while this panel is open." else "Live exact attribution requires Tracker Shield to be running with this app selected.",
+            if (liveMode) "Updating every 2 seconds while this panel is open. The live test window keeps counting while you switch to the app and come back." else "Live exact attribution requires Tracker Shield to be running with this app selected.",
             11f,
             secondary,
             Typeface.NORMAL
@@ -282,15 +292,37 @@ class ProtectionAppsActivity : AppCompatActivity() {
             val number = NumberFormat.getIntegerInstance()
             val deltaDecisions = (profile.cumulativeDecisions - baselineDecisions).coerceAtLeast(0L)
             val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
-            if (deltaDecisions > 0L) {
-                panel.addView(text("SINCE OPENED  +${number.format(deltaDecisions)} DNS decision(s)  •  +${number.format(deltaBlocked)} blocked", 12f, if (deltaBlocked > 0L) amber else green, Typeface.BOLD).top(dp(8)))
+            val deltaAllowed = (deltaDecisions - deltaBlocked).coerceAtLeast(0L)
+            val liveWindowColor = when {
+                deltaBlocked > 0L -> amber
+                deltaDecisions > 0L -> green
+                else -> secondary
             }
+            val liveWindowSummary = when {
+                deltaDecisions == 0L -> "No new exact-attribution DNS decisions yet. Open ${app.label}, use it for a moment, then return here."
+                deltaBlocked == 0L -> "New traffic was seen, with no new tracker blocks in this test window."
+                deltaBlocked * 4L < deltaDecisions -> "Some new tracker traffic was blocked, while most new DNS decisions were allowed."
+                else -> "This test window is tracker-heavy. Review the NEW rows and companies below; this is a privacy signal, not proof of malware."
+            }
+            panel.addView(text("LIVE TEST WINDOW", 11f, liveWindowColor, Typeface.BOLD).top(dp(9)))
+            panel.addView(text("+${number.format(deltaDecisions)} DNS  •  +${number.format(deltaBlocked)} blocked  •  +${number.format(deltaAllowed)} allowed\nStarted ${age(baselineStartedAt)}", 12f, primary, Typeface.BOLD).top(dp(3)))
+            panel.addView(text(liveWindowSummary, 12f, secondary, Typeface.NORMAL).top(dp(4)))
+            panel.addView(MaterialButton(this).apply {
+                text = "RESET LIVE COUNTER"
+                minHeight = dp(40)
+                setOnClickListener {
+                    resetLiveWindow(app.packageName)
+                    renderApps()
+                    restartLiveRefresh()
+                }
+            }.top(dp(7)))
+
             val status = when {
                 profile.blockedDecisions == 0L -> "Nothing in Guardian's retained exact history was classified as a tracker. That is reassuring, but it is not a malware verdict."
                 profile.blockedDecisions * 4L < profile.cumulativeDecisions -> "Some tracker activity was seen, but most attributed DNS requests were allowed. This is common in ad-supported or analytics-enabled apps."
                 else -> "Guardian has repeatedly blocked classified tracker requests from this app. Review the companies and domains below; frequent tracking is a privacy concern, not proof of malware."
             }
-            panel.addView(text("${number.format(profile.cumulativeDecisions)} DNS decisions  •  ${number.format(profile.blockedDecisions)} blocked  •  ${number.format(profile.allowedDecisions)} allowed\n${profile.uniqueTrackerDomains} tracker domain(s) seen  •  last activity ${age(profile.lastSeenAt)}", 13f, primary, Typeface.BOLD).top(dp(7)))
+            panel.addView(text("${number.format(profile.cumulativeDecisions)} DNS decisions  •  ${number.format(profile.blockedDecisions)} blocked  •  ${number.format(profile.allowedDecisions)} allowed\n${profile.uniqueTrackerDomains} tracker domain(s) seen  •  last activity ${age(profile.lastSeenAt)}", 13f, primary, Typeface.BOLD).top(dp(10)))
             panel.addView(text("SHOULD I CARE?", 11f, if (profile.blockedDecisions > 0L) amber else green, Typeface.BOLD).top(dp(11)))
             panel.addView(text(status, 13f, secondary, Typeface.NORMAL).top(dp(4)))
 
@@ -305,10 +337,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 panel.addView(text("RECENT DNS ACTIVITY", 11f, violet, Typeface.BOLD).top(dp(12)))
                 profile.recentDecisions.take(8).forEach { decision ->
                     val state = if (decision.blocked) "BLOCKED" else "ALLOWED"
+                    val isNew = baselineStartedAt > 0L && decision.lastSeenAt >= baselineStartedAt
                     val detail = listOfNotNull(decision.category, decision.provider).distinct().joinToString(" · ")
                     val purpose = domainPurpose(decision.domain, decision.blocked, decision.category)
                     val suffix = listOf(detail, purpose).filter { it.isNotBlank() }.joinToString("\n  ")
-                    panel.addView(text("$state  ${decision.domain}  ×${decision.count}${if (suffix.isBlank()) "" else "\n  $suffix"}", 12f, if (decision.blocked) primary else secondary, if (decision.blocked) Typeface.BOLD else Typeface.NORMAL).top(dp(5)))
+                    panel.addView(text("${if (isNew) "NEW  " else ""}$state  ${decision.domain}  ×${decision.count}${if (suffix.isBlank()) "" else "\n  $suffix"}", 12f, if (isNew || decision.blocked) primary else secondary, if (isNew || decision.blocked) Typeface.BOLD else Typeface.NORMAL).top(dp(5)))
                 }
             }
         }
