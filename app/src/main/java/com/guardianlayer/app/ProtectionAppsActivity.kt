@@ -298,15 +298,36 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 deltaDecisions > 0L -> green
                 else -> secondary
             }
+            val newRows = profile.recentDecisions.filter { baselineStartedAt > 0L && it.lastSeenAt >= baselineStartedAt }
+            val newBlockedRows = newRows.filter { it.blocked }
+            val newAllowedRows = newRows.filterNot { it.blocked }
             val liveWindowSummary = when {
                 deltaDecisions == 0L -> "No new exact-attribution DNS decisions yet. Open ${app.label}, use it for a moment, then return here."
                 deltaBlocked == 0L -> "New traffic was seen, with no new tracker blocks in this test window."
                 deltaBlocked * 4L < deltaDecisions -> "Some new tracker traffic was blocked, while most new DNS decisions were allowed."
                 else -> "This test window is tracker-heavy. Review the NEW rows and companies below; this is a privacy signal, not proof of malware."
             }
+            val changedExplanation = when {
+                deltaDecisions == 0L -> "Guardian is ready to compare the next activity against this baseline."
+                deltaBlocked == 0L -> {
+                    val examples = newAllowedRows.map { it.domain }.distinct().take(3)
+                    if (examples.isEmpty()) {
+                        "Guardian saw new allowed DNS activity and no newly blocked trackers."
+                    } else {
+                        "Guardian saw only allowed service traffic in this window. Recent examples: ${examples.joinToString(", ")}."
+                    }
+                }
+                else -> {
+                    val providers = newBlockedRows.mapNotNull { it.provider }.distinct().take(3)
+                    val providerText = if (providers.isEmpty()) "classified tracker traffic" else providers.joinToString(", ")
+                    "Guardian blocked ${number.format(deltaBlocked)} new tracker request(s) in this window. New blocked traffic included ${providerText}. This is a privacy event, not a malware finding."
+                }
+            }
             panel.addView(text("LIVE TEST WINDOW", 11f, liveWindowColor, Typeface.BOLD).top(dp(9)))
             panel.addView(text("+${number.format(deltaDecisions)} DNS  •  +${number.format(deltaBlocked)} blocked  •  +${number.format(deltaAllowed)} allowed\nStarted ${age(baselineStartedAt)}", 12f, primary, Typeface.BOLD).top(dp(3)))
             panel.addView(text(liveWindowSummary, 12f, secondary, Typeface.NORMAL).top(dp(4)))
+            panel.addView(text("WHAT CHANGED?", 11f, violet, Typeface.BOLD).top(dp(9)))
+            panel.addView(text(changedExplanation, 12f, primary, Typeface.NORMAL).top(dp(3)))
             panel.addView(MaterialButton(this).apply {
                 text = "RESET LIVE COUNTER"
                 minHeight = dp(40)
