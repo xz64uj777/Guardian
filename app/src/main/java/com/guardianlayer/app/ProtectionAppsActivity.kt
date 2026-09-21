@@ -290,6 +290,40 @@ class ProtectionAppsActivity : AppCompatActivity() {
             panel.addView(text("Try running Tracker Shield with this app selected, use the app normally, then keep this panel open.", 12f, primary, Typeface.BOLD).top(dp(8)))
         } else {
             val number = NumberFormat.getIntegerInstance()
+            val now = System.currentTimeMillis()
+            val rightNow = TrackerActivityStore.recentWindow(
+                this,
+                app.packageName,
+                now - TimeUnit.MINUTES.toMillis(1)
+            )
+            val rightNowColor = when {
+                rightNow.blockedDecisions > 0L -> amber
+                rightNow.decisions > 0L -> green
+                else -> secondary
+            }
+            val rightNowState = when {
+                rightNow.decisions == 0L ->
+                    "QUIET  •  No exact-attribution DNS activity in the last 60 seconds. Last app activity ${age(profile.lastSeenAt)}."
+                rightNow.blockedDecisions == 0L -> {
+                    val domains = rightNow.topDomains.joinToString(", ") { it.name }
+                    "ACTIVE  •  ${number.format(rightNow.decisions)} DNS  •  0 blocked  •  ${number.format(rightNow.allowedDecisions)} allowed" +
+                        if (domains.isBlank()) "" else "\nMost active: $domains"
+                }
+                else -> {
+                    val providers = rightNow.blockedProviders.joinToString(", ") { it.name }
+                    "ACTIVE  •  ${number.format(rightNow.decisions)} DNS  •  ${number.format(rightNow.blockedDecisions)} blocked  •  ${number.format(rightNow.allowedDecisions)} allowed" +
+                        if (providers.isBlank()) "\nGuardian is blocking tracker traffic now." else "\nBlocking now: $providers"
+                }
+            }
+            panel.addView(text("RIGHT NOW  •  LAST 60 SEC", 11f, rightNowColor, Typeface.BOLD).top(dp(9)))
+            panel.addView(text(rightNowState, 12f, primary, Typeface.BOLD).top(dp(3)))
+            panel.addView(text(
+                "This short window is separate from the longer live test below and only uses traffic Guardian can attribute confidently to this app.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(3)))
+
             val deltaDecisions = (profile.cumulativeDecisions - baselineDecisions).coerceAtLeast(0L)
             val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
             val deltaAllowed = (deltaDecisions - deltaBlocked).coerceAtLeast(0L)
