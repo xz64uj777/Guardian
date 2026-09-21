@@ -65,6 +65,15 @@ object TrackerActivityStore {
         val recentDecisions: List<Decision>
     )
 
+    data class RecentWindow(
+        val decisions: Long,
+        val blockedDecisions: Long,
+        val allowedDecisions: Long,
+        val lastSeenAt: Long,
+        val topDomains: List<NamedCount>,
+        val blockedProviders: List<NamedCount>
+    )
+
     private data class LifetimeTracker(
         val domain: String,
         val category: String,
@@ -181,6 +190,38 @@ object TrackerActivityStore {
         return buildProfile(
             entries.filter { it.packageName == packageName },
             lifetime[packageName]
+        )
+    }
+
+    @Synchronized
+    fun recentWindow(
+        context: Context,
+        packageName: String,
+        sinceTimestamp: Long
+    ): RecentWindow {
+        val matches = entries(context).filter {
+            it.packageName == packageName && it.lastSeenAt >= sinceTimestamp
+        }
+        val decisions = matches.sumOf { it.count }
+        val blocked = matches.filter { it.blocked }.sumOf { it.count }
+        val topDomains = matches
+            .groupBy { it.domain }
+            .map { (domain, rows) -> NamedCount(domain, rows.sumOf { it.count }) }
+            .sortedByDescending { it.count }
+            .take(3)
+        val providers = matches
+            .filter { it.blocked && !it.provider.isNullOrBlank() }
+            .groupBy { it.provider!! }
+            .map { (provider, rows) -> NamedCount(provider, rows.sumOf { it.count }) }
+            .sortedByDescending { it.count }
+            .take(3)
+        return RecentWindow(
+            decisions = decisions,
+            blockedDecisions = blocked,
+            allowedDecisions = (decisions - blocked).coerceAtLeast(0L),
+            lastSeenAt = matches.maxOfOrNull { it.lastSeenAt } ?: 0L,
+            topDomains = topDomains,
+            blockedProviders = providers
         )
     }
 
