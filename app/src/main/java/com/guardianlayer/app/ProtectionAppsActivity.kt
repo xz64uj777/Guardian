@@ -173,6 +173,18 @@ class ProtectionAppsActivity : AppCompatActivity() {
         if (expandedPackageName != null && !loading) liveHandler.postDelayed(liveRefresh, 2_000L)
     }
 
+    private fun isExactLive(packageName: String): Boolean {
+        if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
+        val active = GuardianVpnService.activeRulePackages()
+        return active.size == 1 && packageName in active
+    }
+
+    private fun isSharedShieldSession(packageName: String): Boolean {
+        if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
+        val active = GuardianVpnService.activeRulePackages()
+        return active.size > 1 && packageName in active
+    }
+
     private fun resetLiveWindow(packageName: String) {
         val profile = TrackerActivityStore.profile(this, packageName)
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
@@ -217,6 +229,38 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         val name = text(app.label, 16f, primary, Typeface.BOLD)
         val pkg = text(app.packageName, 10f, secondary, Typeface.NORMAL).top(dp(2))
+        val profile = TrackerActivityStore.profile(this, app.packageName)
+        val statusLine = when {
+            isExactLive(app.packageName) -> {
+                val recent = TrackerActivityStore.recentWindow(
+                    this,
+                    app.packageName,
+                    System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(1)
+                )
+                if (recent.decisions > 0L) {
+                    "ACTIVE NOW  •  ${recent.decisions} DNS  •  ${recent.blockedDecisions} blocked"
+                } else {
+                    "QUIET NOW  •  exact live watch active"
+                }
+            }
+            isSharedShieldSession(app.packageName) ->
+                "SHARED SHIELD SESSION  •  exact per-app live unavailable"
+            profile != null ->
+                "HISTORY  •  last ${age(profile.lastSeenAt)}  •  ${profile.blockedDecisions} blocked total"
+            else -> null
+        }
+        val activityStatus = statusLine?.let {
+            text(
+                it,
+                11f,
+                when {
+                    isExactLive(app.packageName) -> green
+                    isSharedShieldSession(app.packageName) -> amber
+                    else -> secondary
+                },
+                if (isExactLive(app.packageName)) Typeface.BOLD else Typeface.NORMAL
+            ).top(dp(5))
+        }
         val buttons = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
         val block = MaterialButton(this).apply { minWidth = 0; minimumWidth = 0; textSize = 11f }
         val shield = MaterialButton(this).apply { minWidth = 0; minimumWidth = 0; textSize = 11f }
@@ -262,7 +306,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
         buttons.addView(block, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         buttons.addView(shield, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply { leftMargin = dp(8) })
-        row.addView(name); row.addView(pkg); row.addView(buttons.top(dp(9))); row.addView(details.top(dp(4)))
+        row.addView(name)
+        row.addView(pkg)
+        activityStatus?.let { row.addView(it) }
+        row.addView(buttons.top(dp(9)))
+        row.addView(details.top(dp(4)))
         if (expandedPackageName == app.packageName) row.addView(activityPanel(app).top(dp(8)))
         refreshButtons()
         return row
@@ -275,11 +323,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
             background = rounded(raised, 14f)
         }
         val profile = TrackerActivityStore.profile(this, app.packageName)
-        val liveMode = GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
-            TrackerShieldRuleStore.isProtected(this, app.packageName)
+        val liveMode = isExactLive(app.packageName)
+        val sharedShieldSession = isSharedShieldSession(app.packageName)
         panel.addView(text(if (liveMode) "APP ACTIVITY  •  LIVE" else "APP ACTIVITY", 12f, if (liveMode) green else violet, Typeface.BOLD))
         panel.addView(text(
-            if (liveMode) "Updating every 2 seconds while this panel is open. The live test window keeps counting while you switch to the app and come back." else "Live exact attribution requires Tracker Shield to be running with this app selected.",
+            when {
+                liveMode -> "Updating every 2 seconds while this panel is open. The live test window keeps counting while you switch to the app and come back."
+                sharedShieldSession -> "Tracker Shield is protecting multiple apps. Guardian will not claim exact per-app live attribution in this shared session."
+                else -> "Live exact attribution requires Tracker Shield to be running with only this app in the active shield session."
+            },
             11f,
             secondary,
             Typeface.NORMAL
@@ -297,11 +349,16 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 now - TimeUnit.MINUTES.toMillis(1)
             )
             val rightNowColor = when {
+                !liveMode -> secondary
                 rightNow.blockedDecisions > 0L -> amber
                 rightNow.decisions > 0L -> green
                 else -> secondary
             }
             val rightNowState = when {
+                !liveMode && sharedShieldSession ->
+                    "NOT EXACT LIVE  •  This is a shared Tracker Shield session. Use one active shielded app for exact per-app RIGHT NOW activity."
+                !liveMode ->
+                    "NOT LIVE  •  Exact per-app monitoring is not active for this app right now. Last exact activity ${age(profile.lastSeenAt)}."
                 rightNow.decisions == 0L ->
                     "QUIET  •  No exact-attribution DNS activity in the last 60 seconds. Last app activity ${age(profile.lastSeenAt)}."
                 rightNow.blockedDecisions == 0L -> {
@@ -339,7 +396,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 deltaDecisions == 0L -> "No new exact-attribution DNS decisions yet. Open ${app.label}, use it for a moment, then return here."
                 deltaBlocked == 0L -> "New traffic was seen, with no new tracker blocks in this test window."
                 deltaBlocked * 4L < deltaDecisions -> "Some new tracker traffic was blocked, while most new DNS decisions were allowed."
-                else -> "This test window is tracker-heavy. Review the NEW rows and companies below; this is a privacy signal, not proof of malware."
+                else -> "Tracker activity was elevated in this test window. Review the NEW rows and companies below; this is a privacy signal, not proof of malware."
             }
             val changedExplanation = when {
                 deltaDecisions == 0L -> "Guardian is ready to compare the next activity against this baseline."
