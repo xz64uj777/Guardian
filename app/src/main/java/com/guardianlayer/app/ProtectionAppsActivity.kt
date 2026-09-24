@@ -1,7 +1,9 @@
 package com.guardianlayer.app
 
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.VpnService
 import android.graphics.drawable.GradientDrawable
 import android.os.Bundle
 import android.os.Handler
@@ -12,7 +14,9 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 import com.guardianlayer.app.data.TrackerActivityStore
@@ -51,13 +55,16 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
+    private var pendingExactWatchPackage: String? = null
     private val liveHandler = Handler(Looper.getMainLooper())
     private val liveRefresh = object : Runnable {
         override fun run() {
-            if (!isFinishing && expandedPackageName != null && ::list.isInitialized && !loading) {
-                renderApps()
-                liveHandler.postDelayed(this, 2_000L)
-            }
+            if (isFinishing || !::list.isInitialized || loading) return
+            val shouldRefresh = expandedPackageName != null ||
+                GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD
+            if (!shouldRefresh) return
+            renderApps()
+            liveHandler.postDelayed(this, if (expandedPackageName != null) 2_000L else 5_000L)
         }
     }
 
@@ -70,6 +77,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
         baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
         baselineStartedAt = savedInstanceState?.getLong("baselineStartedAt") ?: 0L
+        pendingExactWatchPackage = savedInstanceState?.getString("pendingExactWatchPackage")
         title = "Guardian Protection Apps"
         setContentView(buildUi())
         loadApps()
@@ -94,6 +102,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putLong("baselineDecisions", baselineDecisions)
         outState.putLong("baselineBlocked", baselineBlocked)
         outState.putLong("baselineStartedAt", baselineStartedAt)
+        outState.putString("pendingExactWatchPackage", pendingExactWatchPackage)
         super.onSaveInstanceState(outState)
     }
 
@@ -170,7 +179,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
     private fun restartLiveRefresh() {
         liveHandler.removeCallbacks(liveRefresh)
-        if (expandedPackageName != null && !loading) liveHandler.postDelayed(liveRefresh, 2_000L)
+        if (loading) return
+        if (expandedPackageName != null || GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            liveHandler.postDelayed(liveRefresh, if (expandedPackageName != null) 2_000L else 5_000L)
+        }
     }
 
     private fun isExactLive(packageName: String): Boolean {
@@ -183,6 +195,67 @@ class ProtectionAppsActivity : AppCompatActivity() {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
         return active.size > 1 && packageName in active
+    }
+
+    private fun requestExactWatch(packageName: String) {
+        TrackerShieldRuleStore.replaceProtected(this, setOf(packageName))
+        FirewallRuleStore.setBlocked(this, packageName, false)
+        expandedPackageName = packageName
+        resetLiveWindow(packageName)
+
+        when (GuardianVpnService.currentMode()) {
+            GuardianVpnService.Mode.TRACKER_SHIELD -> {
+                startTrackerShield()
+                Toast.makeText(this, "Exact watch switching to this app", Toast.LENGTH_SHORT).show()
+            }
+            GuardianVpnService.Mode.OFF -> {
+                val prepare = VpnService.prepare(this)
+                if (prepare != null) {
+                    pendingExactWatchPackage = packageName
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(prepare, 902)
+                } else {
+                    startTrackerShield()
+                }
+            }
+            else -> {
+                Toast.makeText(
+                    this,
+                    "Exact watch saved. Stop the current protection mode, then start Tracker Shield.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+        refreshSummary()
+        renderApps()
+        restartLiveRefresh()
+    }
+
+    private fun startTrackerShield() {
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, GuardianVpnService::class.java).setAction(GuardianVpnService.ACTION_TRACKER_SHIELD)
+        )
+        liveHandler.postDelayed({
+            if (!isFinishing && !isDestroyed) {
+                renderApps()
+                refreshSummary()
+                restartLiveRefresh()
+            }
+        }, 350L)
+    }
+
+    @Deprecated("Deprecated in Android API; retained for VpnService consent compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == 902) {
+            val packageName = pendingExactWatchPackage
+            pendingExactWatchPackage = null
+            if (resultCode == RESULT_OK && packageName != null) {
+                TrackerShieldRuleStore.replaceProtected(this, setOf(packageName))
+                startTrackerShield()
+            }
+        }
     }
 
     private fun resetLiveWindow(packageName: String) {
@@ -456,6 +529,24 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     panel.addView(text("${if (isNew) "NEW  " else ""}$state  ${decision.domain}  ×${decision.count}${if (suffix.isBlank()) "" else "\n  $suffix"}", 12f, if (isNew || decision.blocked) primary else secondary, if (isNew || decision.blocked) Typeface.BOLD else Typeface.NORMAL).top(dp(5)))
                 }
             }
+        }
+
+        if (!liveMode) {
+            panel.addView(MaterialButton(this).apply {
+                text = "WATCH ONLY THIS APP"
+                minHeight = dp(44)
+                setOnClickListener { requestExactWatch(app.packageName) }
+            }.top(dp(12)))
+            panel.addView(text(
+                when {
+                    sharedShieldSession -> "This will replace the shared Tracker Shield selection with only ${app.label} so Guardian can attribute its DNS activity exactly."
+                    GuardianVpnService.currentMode() == GuardianVpnService.Mode.OFF -> "This will make ${app.label} the only shielded app and start Tracker Shield after Android VPN permission if needed."
+                    else -> "This saves ${app.label} as the only shielded app. Guardian will not replace Firewall or Lock Down automatically."
+                },
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
         }
 
         val allow = MaterialButton(this).apply {
