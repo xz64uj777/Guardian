@@ -25,5 +25,12 @@ object TrackerShieldRuleStore {
             .apply()
     }
 
+    fun replaceProtected(context: Context, packageNames: Set<String>) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putStringSet(KEY_PACKAGES, packageNames.filter { it.isNotBlank() }.toSet())
+            .apply()
+    }
+
     fun protectedCount(context: Context): Int = protectedPackages(context).size
 }
