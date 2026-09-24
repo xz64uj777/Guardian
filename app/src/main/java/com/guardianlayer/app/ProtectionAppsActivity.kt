@@ -56,15 +56,22 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
     private var pendingExactWatchPackage: String? = null
+    private var expandedPanelHost: LinearLayout? = null
     private val liveHandler = Handler(Looper.getMainLooper())
     private val liveRefresh = object : Runnable {
         override fun run() {
             if (isFinishing || !::list.isInitialized || loading) return
-            val shouldRefresh = expandedPackageName != null ||
+            val expanded = expandedPackageName
+            val shouldRefresh = expanded != null ||
                 GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD
             if (!shouldRefresh) return
-            renderApps()
-            liveHandler.postDelayed(this, if (expandedPackageName != null) 2_000L else 5_000L)
+
+            if (expanded != null) {
+                refreshExpandedPanel()
+            } else {
+                renderApps()
+            }
+            liveHandler.postDelayed(this, if (expanded != null) 2_000L else 5_000L)
         }
     }
 
@@ -266,6 +273,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     }
 
     private fun renderApps() {
+        expandedPanelHost = null
         list.removeAllViews()
         if (loading) {
             list.addView(text("Loading apps…", 14f, secondary, Typeface.NORMAL))
@@ -384,9 +392,37 @@ class ProtectionAppsActivity : AppCompatActivity() {
         activityStatus?.let { row.addView(it) }
         row.addView(buttons.top(dp(9)))
         row.addView(details.top(dp(4)))
-        if (expandedPackageName == app.packageName) row.addView(activityPanel(app).top(dp(8)))
+        if (expandedPackageName == app.packageName) {
+            val host = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                addView(activityPanel(app))
+            }
+            expandedPanelHost = host
+            row.addView(host.top(dp(8)))
+        }
         refreshButtons()
         return row
+    }
+
+    private fun refreshExpandedPanel() {
+        val packageName = expandedPackageName ?: return
+        val host = expandedPanelHost ?: run {
+            renderApps()
+            return
+        }
+        val app = apps.firstOrNull { it.packageName == packageName } ?: return
+        host.removeAllViews()
+        host.addView(activityPanel(app))
+        refreshSummary()
+    }
+
+    private fun openAppForTest(app: FirewallApp) {
+        val launchIntent = packageManager.getLaunchIntentForPackage(app.packageName)
+        if (launchIntent == null) {
+            Toast.makeText(this, "Guardian could not open ${app.label}", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startActivity(launchIntent)
     }
 
     private fun activityPanel(app: FirewallApp): LinearLayout {
@@ -497,7 +533,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 minHeight = dp(40)
                 setOnClickListener {
                     resetLiveWindow(app.packageName)
-                    renderApps()
+                    refreshExpandedPanel()
                     restartLiveRefresh()
                 }
             }.top(dp(7)))
@@ -543,6 +579,20 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     GuardianVpnService.currentMode() == GuardianVpnService.Mode.OFF -> "This will make ${app.label} the only shielded app and start Tracker Shield after Android VPN permission if needed."
                     else -> "This saves ${app.label} as the only shielded app. Guardian will not replace Firewall or Lock Down automatically."
                 },
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
+        }
+
+        if (liveMode && packageManager.getLaunchIntentForPackage(app.packageName) != null) {
+            panel.addView(MaterialButton(this).apply {
+                text = "OPEN APP TO TEST"
+                minHeight = dp(44)
+                setOnClickListener { openAppForTest(app) }
+            }.top(dp(12)))
+            panel.addView(text(
+                "Guardian keeps the exact-watch session running while you use the app. Return here to review RIGHT NOW and WHAT CHANGED.",
                 11f,
                 secondary,
                 Typeface.NORMAL
