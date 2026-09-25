@@ -58,6 +58,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
+    private var frozenAt = 0L
+    private var frozenDecisions = 0L
+    private var frozenBlocked = 0L
+    private var frozenReportText: String? = null
     private var pendingExactWatchPackage: String? = null
     private var expandedPanelHost: LinearLayout? = null
     private val liveHandler = Handler(Looper.getMainLooper())
@@ -87,6 +91,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
         baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
         baselineStartedAt = savedInstanceState?.getLong("baselineStartedAt") ?: 0L
+        frozenAt = savedInstanceState?.getLong("frozenAt") ?: 0L
+        frozenDecisions = savedInstanceState?.getLong("frozenDecisions") ?: 0L
+        frozenBlocked = savedInstanceState?.getLong("frozenBlocked") ?: 0L
+        frozenReportText = savedInstanceState?.getString("frozenReportText")
         pendingExactWatchPackage = savedInstanceState?.getString("pendingExactWatchPackage")
         title = "Guardian Protection Apps"
         setContentView(buildUi())
@@ -112,6 +120,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putLong("baselineDecisions", baselineDecisions)
         outState.putLong("baselineBlocked", baselineBlocked)
         outState.putLong("baselineStartedAt", baselineStartedAt)
+        outState.putLong("frozenAt", frozenAt)
+        outState.putLong("frozenDecisions", frozenDecisions)
+        outState.putLong("frozenBlocked", frozenBlocked)
+        outState.putString("frozenReportText", frozenReportText)
         outState.putString("pendingExactWatchPackage", pendingExactWatchPackage)
         super.onSaveInstanceState(outState)
     }
@@ -273,6 +285,20 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
         baselineBlocked = profile?.blockedDecisions ?: 0L
         baselineStartedAt = System.currentTimeMillis()
+        frozenAt = 0L
+        frozenDecisions = 0L
+        frozenBlocked = 0L
+        frozenReportText = null
+    }
+
+    private fun freezeLiveWindow(app: FirewallApp) {
+        val profile = TrackerActivityStore.profile(this, app.packageName) ?: return
+        frozenAt = System.currentTimeMillis()
+        frozenDecisions = profile.cumulativeDecisions
+        frozenBlocked = profile.blockedDecisions
+        frozenReportText = buildLiveReport(app, profile)
+        refreshExpandedPanel()
+        restartLiveRefresh()
     }
 
     private fun renderApps() {
@@ -380,6 +406,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 baselineDecisions = 0L
                 baselineBlocked = 0L
                 baselineStartedAt = 0L
+                frozenAt = 0L
+                frozenDecisions = 0L
+                frozenBlocked = 0L
+                frozenReportText = null
             } else {
                 expandedPackageName = app.packageName
                 resetLiveWindow(app.packageName)
@@ -502,7 +532,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private fun copyLiveReport(app: FirewallApp, profile: TrackerActivityStore.AppProfile) {
         val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(
-            ClipData.newPlainText("Guardian app activity report", buildLiveReport(app, profile))
+            ClipData.newPlainText(
+                "Guardian app activity report",
+                frozenReportText ?: buildLiveReport(app, profile)
+            )
         )
         Toast.makeText(this, "Guardian report copied", Toast.LENGTH_SHORT).show()
     }
@@ -511,7 +544,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val shareIntent = Intent(Intent.ACTION_SEND).apply {
             type = "text/plain"
             putExtra(Intent.EXTRA_SUBJECT, "Guardian app activity report: ${app.label}")
-            putExtra(Intent.EXTRA_TEXT, buildLiveReport(app, profile))
+            putExtra(Intent.EXTRA_TEXT, frozenReportText ?: buildLiveReport(app, profile))
         }
         startActivity(Intent.createChooser(shareIntent, "Share Guardian report"))
     }
@@ -581,15 +614,21 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 Typeface.NORMAL
             ).top(dp(3)))
 
-            val deltaDecisions = (profile.cumulativeDecisions - baselineDecisions).coerceAtLeast(0L)
-            val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
+            val testDecisions = if (frozenAt > 0L) frozenDecisions else profile.cumulativeDecisions
+            val testBlocked = if (frozenAt > 0L) frozenBlocked else profile.blockedDecisions
+            val deltaDecisions = (testDecisions - baselineDecisions).coerceAtLeast(0L)
+            val deltaBlocked = (testBlocked - baselineBlocked).coerceAtLeast(0L)
             val deltaAllowed = (deltaDecisions - deltaBlocked).coerceAtLeast(0L)
             val liveWindowColor = when {
                 deltaBlocked > 0L -> amber
                 deltaDecisions > 0L -> green
                 else -> secondary
             }
-            val newRows = profile.recentDecisions.filter { baselineStartedAt > 0L && it.lastSeenAt >= baselineStartedAt }
+            val newRows = profile.recentDecisions.filter {
+                baselineStartedAt > 0L &&
+                    it.lastSeenAt >= baselineStartedAt &&
+                    (frozenAt <= 0L || it.lastSeenAt <= frozenAt)
+            }
             val newBlockedRows = newRows.filter { it.blocked }
             val newAllowedRows = newRows.filterNot { it.blocked }
             val liveWindowSummary = when {
@@ -614,20 +653,42 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     "Guardian blocked ${number.format(deltaBlocked)} new tracker request(s) in this window. New blocked traffic included ${providerText}. This is a privacy event, not a malware finding."
                 }
             }
-            panel.addView(text("LIVE TEST WINDOW", 11f, liveWindowColor, Typeface.BOLD).top(dp(9)))
-            panel.addView(text("+${number.format(deltaDecisions)} DNS  •  +${number.format(deltaBlocked)} blocked  •  +${number.format(deltaAllowed)} allowed\nStarted ${age(baselineStartedAt)}", 12f, primary, Typeface.BOLD).top(dp(3)))
+            panel.addView(text(if (frozenAt > 0L) "TEST RESULT  •  FROZEN" else "LIVE TEST WINDOW", 11f, liveWindowColor, Typeface.BOLD).top(dp(9)))
+            panel.addView(text("+${number.format(deltaDecisions)} DNS  •  +${number.format(deltaBlocked)} blocked  •  +${number.format(deltaAllowed)} allowed\nStarted ${age(baselineStartedAt)}${if (frozenAt > 0L) "  •  frozen " + age(frozenAt) else ""}", 12f, primary, Typeface.BOLD).top(dp(3)))
             panel.addView(text(liveWindowSummary, 12f, secondary, Typeface.NORMAL).top(dp(4)))
             panel.addView(text("WHAT CHANGED?", 11f, violet, Typeface.BOLD).top(dp(9)))
             panel.addView(text(changedExplanation, 12f, primary, Typeface.NORMAL).top(dp(3)))
             panel.addView(MaterialButton(this).apply {
-                text = "RESET LIVE COUNTER"
+                text = if (frozenAt > 0L) "START NEW TEST" else "END TEST / FREEZE RESULT"
                 minHeight = dp(40)
                 setOnClickListener {
-                    resetLiveWindow(app.packageName)
-                    refreshExpandedPanel()
-                    restartLiveRefresh()
+                    if (frozenAt > 0L) {
+                        resetLiveWindow(app.packageName)
+                        refreshExpandedPanel()
+                        restartLiveRefresh()
+                    } else {
+                        freezeLiveWindow(app)
+                    }
                 }
             }.top(dp(7)))
+            if (frozenAt <= 0L) {
+                panel.addView(MaterialButton(this).apply {
+                    text = "RESET LIVE COUNTER"
+                    minHeight = dp(40)
+                    setOnClickListener {
+                        resetLiveWindow(app.packageName)
+                        refreshExpandedPanel()
+                        restartLiveRefresh()
+                    }
+                }.top(dp(4)))
+            } else {
+                panel.addView(text(
+                    "This test result is locked. New traffic can continue, but it will not change the frozen test totals or copied/shared report.",
+                    11f,
+                    secondary,
+                    Typeface.NORMAL
+                ).top(dp(4)))
+            }
 
             val status = when {
                 profile.blockedDecisions == 0L -> "Nothing in Guardian's retained exact history was classified as a tracker. That is reassuring, but it is not a malware verdict."
@@ -712,7 +773,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
             })
             panel.addView(reportActions.top(dp(12)))
             panel.addView(text(
-                "The report includes the current 60-second state, this live test window, retained totals, tracker companies, and recent evidence.",
+                if (frozenAt > 0L)
+                    "The copied/shared report is locked to the frozen test result."
+                else
+                    "The report includes the current 60-second state, this live test window, retained totals, tracker companies, and recent evidence.",
                 11f,
                 secondary,
                 Typeface.NORMAL
