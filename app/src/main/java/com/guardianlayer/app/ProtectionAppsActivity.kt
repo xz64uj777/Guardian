@@ -1,5 +1,8 @@
 package com.guardianlayer.app
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
@@ -425,6 +428,94 @@ class ProtectionAppsActivity : AppCompatActivity() {
         startActivity(launchIntent)
     }
 
+    private fun buildLiveReport(
+        app: FirewallApp,
+        profile: TrackerActivityStore.AppProfile
+    ): String {
+        val number = NumberFormat.getIntegerInstance()
+        val rightNow = TrackerActivityStore.recentWindow(
+            this,
+            app.packageName,
+            System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(1)
+        )
+        val deltaDecisions = (profile.cumulativeDecisions - baselineDecisions).coerceAtLeast(0L)
+        val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
+        val deltaAllowed = (deltaDecisions - deltaBlocked).coerceAtLeast(0L)
+        val activeRules = GuardianVpnService.activeRulePackages()
+        val exactState = if (
+            GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
+            activeRules.size == 1 &&
+            app.packageName in activeRules
+        ) "EXACT LIVE" else "NOT EXACT LIVE"
+
+        val recent = profile.recentDecisions
+            .filter { baselineStartedAt <= 0L || it.lastSeenAt >= baselineStartedAt }
+            .take(8)
+            .joinToString("\n") { decision ->
+                val state = if (decision.blocked) "BLOCKED" else "ALLOWED"
+                val detail = listOfNotNull(decision.category, decision.provider)
+                    .distinct()
+                    .joinToString(" · ")
+                "$state  ${decision.domain}  ×${decision.count}" +
+                    if (detail.isBlank()) "" else "  [$detail]"
+            }
+
+        return buildString {
+            appendLine("GUARDIAN APP ACTIVITY REPORT")
+            appendLine(app.label)
+            appendLine(app.packageName)
+            appendLine()
+            appendLine("Status: $exactState")
+            appendLine(
+                "Right now (last 60 sec): ${number.format(rightNow.decisions)} DNS · " +
+                    "${number.format(rightNow.blockedDecisions)} blocked · " +
+                    "${number.format(rightNow.allowedDecisions)} allowed"
+            )
+            appendLine(
+                "Live test window: +${number.format(deltaDecisions)} DNS · +" +
+                    "${number.format(deltaBlocked)} blocked · +" +
+                    "${number.format(deltaAllowed)} allowed · started ${age(baselineStartedAt)}"
+            )
+            appendLine(
+                "Retained history: ${number.format(profile.cumulativeDecisions)} DNS · " +
+                    "${number.format(profile.blockedDecisions)} blocked · " +
+                    "${number.format(profile.allowedDecisions)} allowed · " +
+                    "${profile.uniqueTrackerDomains} tracker domain(s)"
+            )
+            if (profile.providers.isNotEmpty()) {
+                appendLine()
+                appendLine("Top tracker companies:")
+                profile.providers.take(4).forEach {
+                    appendLine("- ${it.name}: ${number.format(it.count)} blocked")
+                }
+            }
+            if (recent.isNotBlank()) {
+                appendLine()
+                appendLine("Recent test evidence:")
+                appendLine(recent)
+            }
+            appendLine()
+            append("Guardian reports DNS activity it can attribute confidently. Tracker activity is a privacy signal, not proof of malware.")
+        }.trim()
+    }
+
+    private fun copyLiveReport(app: FirewallApp, profile: TrackerActivityStore.AppProfile) {
+        val clipboard = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(
+            ClipData.newPlainText("Guardian app activity report", buildLiveReport(app, profile))
+        )
+        Toast.makeText(this, "Guardian report copied", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun shareLiveReport(app: FirewallApp, profile: TrackerActivityStore.AppProfile) {
+        val shareIntent = Intent(Intent.ACTION_SEND).apply {
+            type = "text/plain"
+            putExtra(Intent.EXTRA_SUBJECT, "Guardian app activity report: ${app.label}")
+            putExtra(Intent.EXTRA_TEXT, buildLiveReport(app, profile))
+        }
+        startActivity(Intent.createChooser(shareIntent, "Share Guardian report"))
+    }
+
     private fun activityPanel(app: FirewallApp): LinearLayout {
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -593,6 +684,35 @@ class ProtectionAppsActivity : AppCompatActivity() {
             }.top(dp(12)))
             panel.addView(text(
                 "Guardian keeps the exact-watch session running while you use the app. Return here to review RIGHT NOW and WHAT CHANGED.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
+        }
+
+        if (profile != null && profile.cumulativeDecisions > 0L) {
+            val reportActions = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
+            reportActions.addView(MaterialButton(this).apply {
+                text = "COPY LIVE REPORT"
+                textSize = 11f
+                minWidth = 0
+                minimumWidth = 0
+                setOnClickListener { copyLiveReport(app, profile) }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            reportActions.addView(MaterialButton(this).apply {
+                text = "SHARE"
+                textSize = 11f
+                minWidth = 0
+                minimumWidth = 0
+                setOnClickListener { shareLiveReport(app, profile) }
+            }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f).apply {
+                leftMargin = dp(8)
+            })
+            panel.addView(reportActions.top(dp(12)))
+            panel.addView(text(
+                "The report includes the current 60-second state, this live test window, retained totals, tracker companies, and recent evidence.",
                 11f,
                 secondary,
                 Typeface.NORMAL
