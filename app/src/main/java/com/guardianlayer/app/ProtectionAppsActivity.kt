@@ -136,7 +136,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
             val side = if (resources.configuration.screenWidthDp >= 600) dp(48) else dp(18)
             setPadding(side, dp(22), side, dp(34))
             addView(text("PROTECTION APPS", 28f, primary, Typeface.BOLD))
-            addView(text("BUILD ${BuildConfig.VERSION_NAME}  •  CURRENT SIGNAL", 11f, green, Typeface.BOLD).top(dp(3)))
+            addView(text("BUILD ${appVersion()}  •  CURRENT SIGNAL", 11f, green, Typeface.BOLD).top(dp(3)))
             addView(text("Choose what Guardian should block or shield, then expand an app to watch the traffic Guardian can attribute to it.", 14f, secondary, Typeface.NORMAL).top(dp(4)))
 
             summary = text("", 14f, primary, Typeface.BOLD).apply {
@@ -526,7 +526,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
         return buildString {
             appendLine("GUARDIAN APP ACTIVITY REPORT")
-            appendLine("Build: ${BuildConfig.VERSION_NAME} · Current Signal")
+            appendLine("Build: ${appVersion()} · Current Signal")
             appendLine(app.label)
             appendLine(app.packageName)
             appendLine()
@@ -863,6 +863,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
         domain.contains("graph", true) -> "Likely app/API service traffic."
         else -> "Allowed service traffic; Guardian has not classified this domain as a tracker."
     }
+
+    @Suppress("DEPRECATION")
+    private fun appVersion(): String =
+        runCatching { packageManager.getPackageInfo(packageName, 0).versionName ?: "unknown" }
+            .getOrDefault("unknown")
 
     private fun age(timestamp: Long): String {
         if (timestamp <= 0L) return "unknown"
