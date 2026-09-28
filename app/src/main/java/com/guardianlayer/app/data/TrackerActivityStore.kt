@@ -71,6 +71,7 @@ object TrackerActivityStore {
         val allowedDecisions: Long,
         val lastSeenAt: Long,
         val topDomains: List<NamedCount>,
+        val blockedDomains: List<NamedCount>,
         val blockedProviders: List<NamedCount>
     )
 
@@ -209,6 +210,12 @@ object TrackerActivityStore {
             .map { (domain, rows) -> NamedCount(domain, rows.sumOf { it.count }) }
             .sortedByDescending { it.count }
             .take(3)
+        val blockedDomains = matches
+            .filter { it.blocked }
+            .groupBy { it.domain }
+            .map { (domain, rows) -> NamedCount(domain, rows.sumOf { it.count }) }
+            .sortedByDescending { it.count }
+            .take(3)
         val providers = matches
             .filter { it.blocked && !it.provider.isNullOrBlank() }
             .groupBy { it.provider!! }
@@ -221,6 +228,7 @@ object TrackerActivityStore {
             allowedDecisions = (decisions - blocked).coerceAtLeast(0L),
             lastSeenAt = matches.maxOfOrNull { it.lastSeenAt } ?: 0L,
             topDomains = topDomains,
+            blockedDomains = blockedDomains,
             blockedProviders = providers
         )
     }
