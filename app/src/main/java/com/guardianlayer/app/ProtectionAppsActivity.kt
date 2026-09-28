@@ -458,6 +458,39 @@ class ProtectionAppsActivity : AppCompatActivity() {
         startActivity(launchIntent)
     }
 
+    private fun currentSignal(window: TrackerActivityStore.RecentWindow): String {
+        if (window.decisions <= 0L) {
+            return "No exact-attribution DNS activity in the last 60 seconds."
+        }
+        if (window.blockedDecisions <= 0L) {
+            val domains = window.topDomains.take(2).joinToString(", ") { it.name }
+            return if (domains.isBlank()) {
+                "Current exact traffic is allowed service traffic; no classified tracker requests were blocked in the last 60 seconds."
+            } else {
+                "Current exact traffic is allowed service traffic; no classified tracker requests were blocked. Most active: $domains."
+            }
+        }
+
+        val blockedPercent = ((window.blockedDecisions * 100L) / window.decisions.coerceAtLeast(1L))
+        val topBlocked = window.blockedDomains.firstOrNull()
+        val topProvider = window.blockedProviders.firstOrNull()
+        val concentration = if (topBlocked != null && window.blockedDecisions > 0L) {
+            (topBlocked.count * 100L) / window.blockedDecisions
+        } else 0L
+
+        val lead = "${window.blockedDecisions} of ${window.decisions} current DNS decisions ($blockedPercent%) were blocked as classified tracker traffic."
+        val driver = when {
+            topBlocked != null && topProvider != null && concentration >= 75L ->
+                " Most blocked requests were concentrated on ${topBlocked.name} (${topBlocked.count}), classified under ${topProvider.name}."
+            topProvider != null ->
+                " The leading blocked provider was ${topProvider.name}."
+            topBlocked != null ->
+                " The leading blocked domain was ${topBlocked.name}."
+            else -> ""
+        }
+        return lead + driver + " This is a privacy signal, not a malware finding."
+    }
+
     private fun buildLiveReport(
         app: FirewallApp,
         profile: TrackerActivityStore.AppProfile
@@ -501,6 +534,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     "${number.format(rightNow.blockedDecisions)} blocked · " +
                     "${number.format(rightNow.allowedDecisions)} allowed"
             )
+            appendLine("Current signal: ${currentSignal(rightNow)}")
             appendLine(
                 "Live test window: +${number.format(deltaDecisions)} DNS · +" +
                     "${number.format(deltaBlocked)} blocked · +" +
@@ -614,6 +648,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 Typeface.NORMAL
             ).top(dp(3)))
 
+            panel.addView(text("CURRENT SIGNAL", 11f, if (rightNow.blockedDecisions > 0L) amber else green, Typeface.BOLD).top(dp(9)))
+            panel.addView(text(currentSignal(rightNow), 12f, primary, Typeface.NORMAL).top(dp(3)))
+
             val testDecisions = if (frozenAt > 0L) frozenDecisions else profile.cumulativeDecisions
             val testBlocked = if (frozenAt > 0L) frozenBlocked else profile.blockedDecisions
             val deltaDecisions = (testDecisions - baselineDecisions).coerceAtLeast(0L)
@@ -624,10 +661,16 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 deltaDecisions > 0L -> green
                 else -> secondary
             }
-            val newRows = profile.recentDecisions.filter {
-                baselineStartedAt > 0L &&
-                    it.lastSeenAt >= baselineStartedAt &&
-                    (frozenAt <= 0L || it.lastSeenAt <= frozenAt)
+            val newRows = if (baselineStartedAt > 0L) {
+                TrackerActivityStore.windowDecisions(
+                    this,
+                    app.packageName,
+                    baselineStartedAt,
+                    if (frozenAt > 0L) frozenAt else Long.MAX_VALUE,
+                    64
+                )
+            } else {
+                emptyList()
             }
             val newBlockedRows = newRows.filter { it.blocked }
             val newAllowedRows = newRows.filterNot { it.blocked }
@@ -706,11 +749,24 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 }
             }
 
-            if (profile.recentDecisions.isNotEmpty()) {
-                panel.addView(text("RECENT DNS ACTIVITY", 11f, violet, Typeface.BOLD).top(dp(12)))
-                profile.recentDecisions.take(8).forEach { decision ->
+            val evidenceRows = if (frozenAt > 0L && baselineStartedAt > 0L) {
+                TrackerActivityStore.windowDecisions(
+                    this,
+                    app.packageName,
+                    baselineStartedAt,
+                    frozenAt,
+                    8
+                )
+            } else {
+                profile.recentDecisions.take(8)
+            }
+            if (evidenceRows.isNotEmpty()) {
+                panel.addView(text(if (frozenAt > 0L) "FROZEN TEST EVIDENCE" else "RECENT DNS ACTIVITY", 11f, violet, Typeface.BOLD).top(dp(12)))
+                evidenceRows.forEach { decision ->
                     val state = if (decision.blocked) "BLOCKED" else "ALLOWED"
-                    val isNew = baselineStartedAt > 0L && decision.lastSeenAt >= baselineStartedAt
+                    val isNew = baselineStartedAt > 0L &&
+                        decision.lastSeenAt >= baselineStartedAt &&
+                        (frozenAt <= 0L || decision.lastSeenAt <= frozenAt)
                     val detail = listOfNotNull(decision.category, decision.provider).distinct().joinToString(" · ")
                     val purpose = domainPurpose(decision.domain, decision.blocked, decision.category)
                     val suffix = listOf(detail, purpose).filter { it.isNotBlank() }.joinToString("\n  ")
