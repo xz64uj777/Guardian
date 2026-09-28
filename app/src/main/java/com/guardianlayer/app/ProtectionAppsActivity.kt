@@ -221,7 +221,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     }
 
     private fun requestExactWatch(packageName: String) {
-        TrackerShieldRuleStore.replaceProtected(this, setOf(packageName))
+        TrackerShieldRuleStore.beginExactWatch(this, packageName)
         FirewallRuleStore.setBlocked(this, packageName, false)
         expandedPackageName = packageName
         resetLiveWindow(packageName)
@@ -268,6 +268,22 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }, 350L)
     }
 
+    private fun restoreNormalShield() {
+        val restored = TrackerShieldRuleStore.restoreAfterExactWatch(this) ?: return
+        if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            startTrackerShield()
+        }
+        val count = restored.size
+        Toast.makeText(
+            this,
+            if (count == 0) "Normal shield restored: no apps selected" else "Normal shield restored: $count app(s)",
+            Toast.LENGTH_SHORT
+        ).show()
+        refreshSummary()
+        renderApps()
+        restartLiveRefresh()
+    }
+
     @Deprecated("Deprecated in Android API; retained for VpnService consent compatibility")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
@@ -275,7 +291,6 @@ class ProtectionAppsActivity : AppCompatActivity() {
             val packageName = pendingExactWatchPackage
             pendingExactWatchPackage = null
             if (resultCode == RESULT_OK && packageName != null) {
-                TrackerShieldRuleStore.replaceProtected(this, setOf(packageName))
                 startTrackerShield()
             }
         }
@@ -809,6 +824,23 @@ class ProtectionAppsActivity : AppCompatActivity() {
             ).top(dp(4)))
         }
 
+        if (
+            TrackerShieldRuleStore.hasExactWatchBackup(this) &&
+            TrackerShieldRuleStore.exactWatchPackage(this) == app.packageName
+        ) {
+            panel.addView(MaterialButton(this).apply {
+                text = "RESTORE NORMAL SHIELD"
+                minHeight = dp(44)
+                setOnClickListener { restoreNormalShield() }
+            }.top(dp(12)))
+            panel.addView(text(
+                "Guardian saved your previous Tracker Shield app selection before Exact Watch. Restore it when this test is finished.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
+        }
+
         if (profile != null && profile.cumulativeDecisions > 0L) {
             val reportActions = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
@@ -884,10 +916,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val blocked = FirewallRuleStore.blockedCount(this)
         val shielded = TrackerShieldRuleStore.protectedCount(this)
         val mode = GuardianVpnService.currentMode()
-        val note = when (mode) {
-            GuardianVpnService.Mode.FIREWALL, GuardianVpnService.Mode.TRACKER_SHIELD -> "Saved selection only. Return Home and use APPLY TO CURRENT MODE if shown; changes do not alter the running VPN until applied."
-            GuardianVpnService.Mode.LOCKDOWN -> "Lock Down remains active. Changing selections will not restore the network."
-            else -> "Selections saved. Return Home to start a protection mode."
+        val note = when {
+            TrackerShieldRuleStore.hasExactWatchBackup(this) ->
+                "EXACT WATCH is active. Your normal Tracker Shield selection is saved and can be restored from the watched app."
+            mode == GuardianVpnService.Mode.FIREWALL || mode == GuardianVpnService.Mode.TRACKER_SHIELD ->
+                "Saved selection only. Return Home and use APPLY TO CURRENT MODE if shown; changes do not alter the running VPN until applied."
+            mode == GuardianVpnService.Mode.LOCKDOWN ->
+                "Lock Down remains active. Changing selections will not restore the network."
+            else ->
+                "Selections saved. Return Home to start a protection mode."
         }
         summary.text = "SMART FIREWALL  $blocked app(s)\nTRACKER SHIELD  $shielded app(s)\n\n$note"
         summary.setTextColor(if ((preferredMode == MODE_FIREWALL && blocked > 0) || (preferredMode == MODE_SHIELD && shielded > 0)) green else primary)
