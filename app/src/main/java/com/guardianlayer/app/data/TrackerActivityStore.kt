@@ -234,6 +234,25 @@ object TrackerActivityStore {
     }
 
     @Synchronized
+    fun windowDecisions(
+        context: Context,
+        packageName: String,
+        sinceTimestamp: Long,
+        untilTimestamp: Long = Long.MAX_VALUE,
+        limit: Int = 8
+    ): List<Decision> =
+        entries(context)
+            .asSequence()
+            .filter {
+                it.packageName == packageName &&
+                    it.lastSeenAt >= sinceTimestamp &&
+                    it.lastSeenAt <= untilTimestamp
+            }
+            .sortedByDescending { it.lastSeenAt }
+            .take(limit.coerceAtLeast(1))
+            .toList()
+
+    @Synchronized
     fun profiles(context: Context): List<AppProfile> {
         val entries = entries(context)
         val lifetime = lifetime(context, entries)
