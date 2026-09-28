@@ -507,6 +507,50 @@ class ProtectionAppsActivity : AppCompatActivity() {
         return lead + driver + " This is a privacy signal, not a malware finding."
     }
 
+    private fun watchSummary(
+        decisions: Long,
+        blocked: Long,
+        allowed: Long,
+        evidence: List<TrackerActivityStore.Decision>,
+        startedAt: Long,
+        endedAt: Long = 0L
+    ): String {
+        val number = NumberFormat.getIntegerInstance()
+        val blockPercent = if (decisions > 0L) (blocked * 100L) / decisions else 0L
+        val blockedRows = evidence.filter { it.blocked }
+        val topProvider = blockedRows
+            .mapNotNull { row -> row.provider?.let { it to row.count } }
+            .groupBy({ it.first }, { it.second })
+            .mapValues { (_, counts) -> counts.sum() }
+            .maxByOrNull { it.value }
+        val topDomain = blockedRows
+            .groupBy { it.domain }
+            .mapValues { (_, rows) -> rows.sumOf { it.count } }
+            .maxByOrNull { it.value }
+        val biggestBurst = blockedRows.maxByOrNull { it.count }
+
+        val durationEnd = if (endedAt > 0L) endedAt else System.currentTimeMillis()
+        val durationMs = (durationEnd - startedAt).coerceAtLeast(0L)
+        val durationText = when {
+            durationMs < TimeUnit.MINUTES.toMillis(1) -> "under 1m"
+            durationMs < TimeUnit.HOURS.toMillis(1) -> "${TimeUnit.MILLISECONDS.toMinutes(durationMs)}m"
+            else -> "${TimeUnit.MILLISECONDS.toHours(durationMs)}h ${TimeUnit.MILLISECONDS.toMinutes(durationMs) % 60}m"
+        }
+
+        return buildString {
+            append("Duration $durationText · ${number.format(decisions)} DNS · ${number.format(blocked)} blocked · ${number.format(allowed)} allowed")
+            if (decisions > 0L) append(" · $blockPercent% blocked")
+            if (topProvider != null) append("\nTop blocked company: ${topProvider.key} (${number.format(topProvider.value)})")
+            if (topDomain != null) append("\nTop blocked domain: ${topDomain.key} (${number.format(topDomain.value)})")
+            if (biggestBurst != null && biggestBurst.count > 1L) {
+                append("\nLargest recorded burst: ${biggestBurst.domain} ×${number.format(biggestBurst.count)}")
+            }
+            if (blocked == 0L && decisions > 0L) {
+                append("\nNo classified tracker requests were blocked during this watch.")
+            }
+        }
+    }
+
     private fun buildLiveReport(
         app: FirewallApp,
         profile: TrackerActivityStore.AppProfile
@@ -557,6 +601,23 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     "${number.format(deltaBlocked)} blocked · +" +
                     "${number.format(deltaAllowed)} allowed · started ${age(baselineStartedAt)}"
             )
+            val watchEvidence = if (baselineStartedAt > 0L) {
+                TrackerActivityStore.windowDecisions(
+                    this@ProtectionAppsActivity,
+                    app.packageName,
+                    baselineStartedAt,
+                    if (frozenAt > 0L) frozenAt else Long.MAX_VALUE,
+                    64
+                )
+            } else emptyList()
+            appendLine("This watch: " + watchSummary(
+                deltaDecisions,
+                deltaBlocked,
+                deltaAllowed,
+                watchEvidence,
+                baselineStartedAt,
+                frozenAt
+            ).replace("\n", " | "))
             appendLine(
                 "Retained history: ${number.format(profile.cumulativeDecisions)} DNS · " +
                     "${number.format(profile.blockedDecisions)} blocked · " +
@@ -713,6 +774,20 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     "Guardian blocked ${number.format(deltaBlocked)} new tracker request(s) in this window. New blocked traffic included ${providerText}. This is a privacy event, not a malware finding."
                 }
             }
+            panel.addView(text("THIS WATCH", 11f, violet, Typeface.BOLD).top(dp(9)))
+            panel.addView(text(
+                watchSummary(
+                    deltaDecisions,
+                    deltaBlocked,
+                    deltaAllowed,
+                    newRows,
+                    baselineStartedAt,
+                    frozenAt
+                ),
+                12f,
+                primary,
+                Typeface.NORMAL
+            ).top(dp(3)))
             panel.addView(text(if (frozenAt > 0L) "TEST RESULT  •  FROZEN" else "LIVE TEST WINDOW", 11f, liveWindowColor, Typeface.BOLD).top(dp(9)))
             panel.addView(text("+${number.format(deltaDecisions)} DNS  •  +${number.format(deltaBlocked)} blocked  •  +${number.format(deltaAllowed)} allowed\nStarted ${age(baselineStartedAt)}${if (frozenAt > 0L) "  •  frozen " + age(frozenAt) else ""}", 12f, primary, Typeface.BOLD).top(dp(3)))
             panel.addView(text(liveWindowSummary, 12f, secondary, Typeface.NORMAL).top(dp(4)))
