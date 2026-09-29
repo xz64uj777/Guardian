@@ -610,6 +610,11 @@ class GuardianVpnService : VpnService() {
                                 provider = classification.provider,
                                 blocked = true
                             )
+                            TrackerBurstAlertStore.maybeNotify(
+                                context = this,
+                                packageName = sourcePackage,
+                                appLabel = sourceLabel
+                            )
                         }
                         recordTrackerShieldDns(
                             request.domain,

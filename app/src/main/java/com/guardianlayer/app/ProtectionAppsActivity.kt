@@ -1,5 +1,6 @@
 package com.guardianlayer.app
 
+import android.Manifest
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
@@ -8,6 +9,8 @@ import android.graphics.Color
 import android.graphics.Typeface
 import android.net.VpnService
 import android.graphics.drawable.GradientDrawable
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -19,6 +22,7 @@ import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
@@ -27,6 +31,7 @@ import com.guardianlayer.app.firewall.FirewallApp
 import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
 import com.guardianlayer.app.firewall.LauncherAppCatalog
+import com.guardianlayer.app.firewall.TrackerBurstAlertStore
 import com.guardianlayer.app.firewall.TrackerShieldRuleStore
 import java.text.NumberFormat
 import java.util.concurrent.TimeUnit
@@ -36,6 +41,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         const val EXTRA_MODE = "mode"
         const val MODE_FIREWALL = "firewall"
         const val MODE_SHIELD = "shield"
+        private const val REQUEST_NOTIFICATIONS = 903
     }
 
     private val page = Color.rgb(11, 12, 17)
@@ -49,6 +55,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
     private lateinit var list: LinearLayout
     private lateinit var summary: TextView
+    private lateinit var burstAlertsButton: MaterialButton
     private var apps: List<FirewallApp> = emptyList()
     private var query = ""
     private var selectedOnly = false
@@ -104,6 +111,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (::summary.isInitialized) refreshSummary()
+        if (::burstAlertsButton.isInitialized) refreshBurstAlertButton()
         if (::list.isInitialized && !loading) renderApps()
         restartLiveRefresh()
     }
@@ -144,6 +152,19 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 background = rounded(surface, 17f)
             }
             addView(summary.top(dp(20)))
+
+            burstAlertsButton = MaterialButton(this@ProtectionAppsActivity).apply {
+                minHeight = dp(44)
+                setOnClickListener { toggleBurstAlerts() }
+            }
+            addView(burstAlertsButton.top(dp(10)))
+            addView(text(
+                "Optional: Guardian can notify you when one exactly attributed app suddenly generates a substantial tracker-blocking burst. Alerts are rate-limited and never treat tracker activity as proof of malware.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
+            refreshBurstAlertButton()
 
             addView(text("BLOCK cuts an app's network access. SHIELD keeps it online and filters visible tracker DNS. ALLOW removes either saved rule. Exact app traffic history is shown only when Guardian can attribute it confidently.", 12f, secondary, Typeface.NORMAL).top(dp(10)))
 
@@ -282,6 +303,58 @@ class ProtectionAppsActivity : AppCompatActivity() {
         refreshSummary()
         renderApps()
         restartLiveRefresh()
+    }
+
+    private fun refreshBurstAlertButton() {
+        if (!::burstAlertsButton.isInitialized) return
+        burstAlertsButton.text = if (TrackerBurstAlertStore.isEnabled(this)) {
+            "TRACKER BURST ALERTS: ON"
+        } else {
+            "ENABLE TRACKER BURST ALERTS"
+        }
+        burstAlertsButton.alpha = if (TrackerBurstAlertStore.isEnabled(this)) 1f else 0.78f
+    }
+
+    private fun toggleBurstAlerts() {
+        if (TrackerBurstAlertStore.isEnabled(this)) {
+            TrackerBurstAlertStore.setEnabled(this, false)
+            refreshBurstAlertButton()
+            Toast.makeText(this, "Tracker burst alerts off", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        if (
+            Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                REQUEST_NOTIFICATIONS
+            )
+            return
+        }
+
+        TrackerBurstAlertStore.setEnabled(this, true)
+        refreshBurstAlertButton()
+        Toast.makeText(this, "Tracker burst alerts on", Toast.LENGTH_SHORT).show()
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQUEST_NOTIFICATIONS) return
+        val granted = grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+        TrackerBurstAlertStore.setEnabled(this, granted)
+        refreshBurstAlertButton()
+        Toast.makeText(
+            this,
+            if (granted) "Tracker burst alerts on" else "Notification permission was not granted",
+            Toast.LENGTH_SHORT
+        ).show()
     }
 
     @Deprecated("Deprecated in Android API; retained for VpnService consent compatibility")
