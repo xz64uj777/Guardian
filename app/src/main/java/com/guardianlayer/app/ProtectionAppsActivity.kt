@@ -27,6 +27,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.widget.doAfterTextChanged
 import com.google.android.material.button.MaterialButton
 import com.guardianlayer.app.data.TrackerActivityStore
+import com.guardianlayer.app.data.GuardianTestSnapshotStore
 import com.guardianlayer.app.firewall.FirewallApp
 import com.guardianlayer.app.firewall.FirewallRuleStore
 import com.guardianlayer.app.firewall.GuardianVpnService
@@ -56,6 +57,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private lateinit var list: LinearLayout
     private lateinit var summary: TextView
     private lateinit var burstAlertsButton: MaterialButton
+    private lateinit var savedTestsButton: MaterialButton
     private var apps: List<FirewallApp> = emptyList()
     private var query = ""
     private var selectedOnly = false
@@ -112,6 +114,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         super.onResume()
         if (::summary.isInitialized) refreshSummary()
         if (::burstAlertsButton.isInitialized) refreshBurstAlertButton()
+        if (::savedTestsButton.isInitialized) refreshSavedTestsButton()
         if (::list.isInitialized && !loading) renderApps()
         restartLiveRefresh()
     }
@@ -165,6 +168,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 Typeface.NORMAL
             ).top(dp(4)))
             refreshBurstAlertButton()
+
+            savedTestsButton = MaterialButton(this@ProtectionAppsActivity).apply {
+                minHeight = dp(44)
+                setOnClickListener {
+                    startActivity(Intent(this@ProtectionAppsActivity, SavedTestsActivity::class.java))
+                }
+            }
+            addView(savedTestsButton.top(dp(8)))
+            refreshSavedTestsButton()
 
             addView(text("BLOCK cuts an app's network access. SHIELD keeps it online and filters visible tracker DNS. ALLOW removes either saved rule. Exact app traffic history is shown only when Guardian can attribute it confidently.", 12f, secondary, Typeface.NORMAL).top(dp(10)))
 
@@ -305,6 +317,13 @@ class ProtectionAppsActivity : AppCompatActivity() {
         restartLiveRefresh()
     }
 
+    private fun refreshSavedTestsButton() {
+        if (!::savedTestsButton.isInitialized) return
+        val count = GuardianTestSnapshotStore.count(this)
+        savedTestsButton.text = if (count == 0) "SAVED TEST HISTORY" else "SAVED TEST HISTORY  •  $count"
+        savedTestsButton.alpha = if (count > 0) 1f else 0.78f
+    }
+
     private fun refreshBurstAlertButton() {
         if (!::burstAlertsButton.isInitialized) return
         burstAlertsButton.text = if (TrackerBurstAlertStore.isEnabled(this)) {
@@ -386,6 +405,25 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenDecisions = profile.cumulativeDecisions
         frozenBlocked = profile.blockedDecisions
         frozenReportText = buildLiveReport(app, profile)
+
+        val decisions = (frozenDecisions - baselineDecisions).coerceAtLeast(0L)
+        val blocked = (frozenBlocked - baselineBlocked).coerceAtLeast(0L)
+        GuardianTestSnapshotStore.save(
+            this,
+            GuardianTestSnapshotStore.Snapshot(
+                id = "${app.packageName}:$baselineStartedAt:$frozenAt",
+                packageName = app.packageName,
+                appLabel = app.label,
+                startedAt = baselineStartedAt,
+                endedAt = frozenAt,
+                decisions = decisions,
+                blocked = blocked,
+                allowed = (decisions - blocked).coerceAtLeast(0L),
+                report = frozenReportText.orEmpty()
+            )
+        )
+        refreshSavedTestsButton()
+        Toast.makeText(this, "Test frozen and saved", Toast.LENGTH_SHORT).show()
         refreshExpandedPanel()
         restartLiveRefresh()
     }

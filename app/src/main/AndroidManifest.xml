@@ -47,6 +47,11 @@
             android:exported="false"
             android:label="Guardian Privacy" />
 
+        <activity
+            android:name=".SavedTestsActivity"
+            android:exported="false"
+            android:label="Guardian Saved Tests" />
+
         <service
             android:name=".firewall.GuardianVpnService"
             android:exported="true"
