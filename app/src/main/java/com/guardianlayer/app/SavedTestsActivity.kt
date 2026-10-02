@@ -110,6 +110,14 @@ class SavedTestsActivity : AppCompatActivity() {
             ).top(dp(6)))
         }.top(dp(18)))
 
+        root.addView(text("APP TIMELINES", 13f, violet, Typeface.BOLD).top(dp(20)))
+        grouped.values
+            .filter { it.size >= 2 }
+            .sortedByDescending { tests -> tests.maxOf { it.endedAt } }
+            .forEach { tests ->
+                root.addView(timelineCard(tests.sortedBy { it.endedAt }).top(dp(9)))
+            }
+
         root.addView(text("${snapshots.size} saved test(s)", 13f, primary, Typeface.BOLD).top(dp(18)))
         snapshots.forEach { snapshot ->
             val previous = grouped[snapshot.packageName]
@@ -184,6 +192,71 @@ class SavedTestsActivity : AppCompatActivity() {
                 minHeight = dp(42)
                 setOnClickListener { showReport(snapshot) }
             }.top(dp(8)))
+        }
+    }
+
+    private fun timelineCard(
+        tests: List<GuardianTestSnapshotStore.Snapshot>
+    ): LinearLayout {
+        val ordered = tests.sortedBy { it.endedAt }
+        val latest = ordered.last()
+        val metrics = ordered.map { metrics(it) }
+        val minBlockShare = metrics.minOf { it.blockRate }
+        val maxBlockShare = metrics.maxOf { it.blockRate }
+        val validDnsRates = metrics.mapNotNull { it.dnsPerMinute }
+        val validBlockedRates = metrics.mapNotNull { it.blockedPerMinute }
+
+        return card().apply {
+            addView(text(latest.appLabel, 17f, primary, Typeface.BOLD))
+            addView(text("${ordered.size} saved Exact Watch sessions", 11f, secondary, Typeface.NORMAL).top(dp(3)))
+            addView(text(
+                "Blocked share range: $minBlockShare%–$maxBlockShare%",
+                12f,
+                primary,
+                Typeface.BOLD
+            ).top(dp(7)))
+            if (validDnsRates.isNotEmpty()) {
+                addView(text(
+                    "DNS/min range: ${rate(validDnsRates.minOrNull())}–${rate(validDnsRates.maxOrNull())}",
+                    11f,
+                    secondary,
+                    Typeface.NORMAL
+                ).top(dp(3)))
+            }
+            if (validBlockedRates.isNotEmpty()) {
+                addView(text(
+                    "Blocked/min range: ${rate(validBlockedRates.minOrNull())}–${rate(validBlockedRates.maxOrNull())}",
+                    11f,
+                    secondary,
+                    Typeface.NORMAL
+                ).top(dp(2)))
+            }
+
+            addView(text("SESSION TIMELINE", 11f, violet, Typeface.BOLD).top(dp(9)))
+            ordered.takeLast(6).forEachIndexed { index, snapshot ->
+                val m = metrics(snapshot)
+                val prefix = if (index == ordered.takeLast(6).lastIndex) "LATEST" else "•"
+                val line = buildString {
+                    append("$prefix  ${date(snapshot.endedAt)}")
+                    append("  •  ${m.blockRate}% blocked")
+                    if (m.dnsPerMinute != null) append("  •  ${rate(m.dnsPerMinute)} DNS/min")
+                    if (m.blockedPerMinute != null) append("  •  ${rate(m.blockedPerMinute)} blocked/min")
+                    append("  •  ${durationText(m.durationMs)}")
+                }
+                addView(text(
+                    line,
+                    11f,
+                    if (index == ordered.takeLast(6).lastIndex) primary else secondary,
+                    if (index == ordered.takeLast(6).lastIndex) Typeface.BOLD else Typeface.NORMAL
+                ).top(dp(4)))
+            }
+
+            addView(text(
+                "Different app use, networks, and remote service behavior can change session traffic. Guardian shows observed variation rather than assigning a risk score.",
+                10f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(7)))
         }
     }
 
