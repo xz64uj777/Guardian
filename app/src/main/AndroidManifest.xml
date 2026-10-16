@@ -39,6 +39,11 @@
             android:label="Guardian Protection Apps" />
 
         <activity
+            android:name=".ApkReviewActivity"
+            android:exported="false"
+            android:label="Guardian APK Security Review" />
+
+        <activity
             android:name=".MainActivity"
             android:exported="false" />
 

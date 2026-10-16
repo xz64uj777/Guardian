@@ -230,6 +230,15 @@ class HomeDashboardActivity : AppCompatActivity() {
             else -> "No Guardian network session recorded yet."
         }).top(dp(9)))
 
+        root.addView(section("DEVICE SECURITY").top(dp(25)))
+        root.addView(actionCard(
+            "APK Security Review",
+            "Inspect a downloaded APK locally: package identity, SHA-256, requested permissions, and risk signals. No installation or execution.",
+            "REVIEW AN APK"
+        ) {
+            startActivity(Intent(this, ApkReviewActivity::class.java))
+        }.top(dp(9)))
+
         root.addView(MaterialButton(this).apply {
             text = "ADVANCED NETWORK CONTROLS"
             setOnClickListener { openAdvancedControls() }
