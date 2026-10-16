@@ -1,0 +1,3 @@
+# Guardian offline SHA-256 threat list
+# Populate only from a curated, verified, versioned feed.
+# An empty list means no known-threat hash matches can be reported.
