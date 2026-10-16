@@ -66,7 +66,7 @@ object GuardianApkScanner {
             if (normalized.endsWith(".apk") && parts.size >= 3 && parts[parts.lastIndex - 1] in decoyExtensions) {
                 signal(35, "Potentially deceptive double extension: " + parts[parts.lastIndex - 1] + ".apk")
             } else if (!normalized.endsWith(".apk")) {
-                signal(if (parts.lastOrNull() in decoyExtensions) 45 else 25, "APK content does not use the normal .apk filename extension")
+                signal(if (parts.lastOrNull()?.let { it in decoyExtensions } == true) 45 else 25, "APK content does not use the normal .apk filename extension")
             }
             val known = hash in loadThreatHashes(context)
             if (known) reasons.add(0, "SHA-256 exactly matches Guardian's bundled offline hash list")
