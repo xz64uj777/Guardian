@@ -45,6 +45,11 @@ The user can mark visible launcher apps as **BLOCKED**. When the Smart Firewall 
 
 This provides genuine per-app internet blocking without pretending Guardian already has a full userspace TCP/UDP forwarder.
 
+
+### Tracker Shield
+
+Tracker Shield uses Guardian's local VPN interface to filter DNS requests that match local tracker rules. It is designed to keep the selected app's ordinary traffic online while blocking matching DNS lookups. A blocked tracker request is a domain/category match, not a malware verdict. Coverage does not include every encrypted DNS path, cached address, or direct-IP connection.
+
 Existing firewall behavior:
 
 - Per-app BLOCK / ALLOW rules stored locally
@@ -55,7 +60,7 @@ Existing firewall behavior:
 - Emergency Restore Network still stops any Guardian VPN mode
 - Stable debug signing allows future CI debug APKs to update the installed test build
 
-## What 0.2 does not claim yet
+## Coverage limits
 
 Selective blocking is not the same thing as full connection monitoring. Current capabilities and coverage must be described from the implementation; Guardian does not claim to inspect every connection or prove that any app is malware-free.
 
