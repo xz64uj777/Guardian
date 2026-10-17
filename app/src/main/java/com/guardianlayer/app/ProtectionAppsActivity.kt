@@ -67,6 +67,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
+    private var baselinePackageName: String? = null
     private var frozenAt = 0L
     private var frozenDecisions = 0L
     private var frozenBlocked = 0L
@@ -100,6 +101,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
         baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
         baselineStartedAt = savedInstanceState?.getLong("baselineStartedAt") ?: 0L
+        baselinePackageName = savedInstanceState?.getString("baselinePackageName")
         frozenAt = savedInstanceState?.getLong("frozenAt") ?: 0L
         frozenDecisions = savedInstanceState?.getLong("frozenDecisions") ?: 0L
         frozenBlocked = savedInstanceState?.getLong("frozenBlocked") ?: 0L
@@ -131,6 +133,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putLong("baselineDecisions", baselineDecisions)
         outState.putLong("baselineBlocked", baselineBlocked)
         outState.putLong("baselineStartedAt", baselineStartedAt)
+        outState.putString("baselinePackageName", baselinePackageName)
         outState.putLong("frozenAt", frozenAt)
         outState.putLong("frozenDecisions", frozenDecisions)
         outState.putLong("frozenBlocked", frozenBlocked)
@@ -393,6 +396,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
         baselineBlocked = profile?.blockedDecisions ?: 0L
         baselineStartedAt = System.currentTimeMillis()
+        baselinePackageName = packageName
         frozenAt = 0L
         frozenDecisions = 0L
         frozenBlocked = 0L
@@ -529,17 +533,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         details.setOnClickListener {
             if (expandedPackageName == app.packageName) {
+                // Hiding the details panel must not restart an ongoing Exact Watch test.
                 expandedPackageName = null
-                baselineDecisions = 0L
-                baselineBlocked = 0L
-                baselineStartedAt = 0L
-                frozenAt = 0L
-                frozenDecisions = 0L
-                frozenBlocked = 0L
-                frozenReportText = null
             } else {
                 expandedPackageName = app.packageName
-                resetLiveWindow(app.packageName)
+                // Keep this app's baseline when returning to its panel; only a deliberate
+                // new test or switching to another app should create a fresh baseline.
+                if (baselineStartedAt == 0L || baselinePackageName != app.packageName) {
+                    resetLiveWindow(app.packageName)
+                }
             }
             renderApps()
             restartLiveRefresh()
