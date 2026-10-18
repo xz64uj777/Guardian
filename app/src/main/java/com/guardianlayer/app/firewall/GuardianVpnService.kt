@@ -323,15 +323,11 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startTrackerShield() {
-        // Exact Watch is a single-app capture session even when the user's normal
-        // Tracker Shield selection contains several apps. Always honor the active
-        // watch target when rebuilding the VPN so a stale/shared selection cannot
-        // silently turn the session back into ambiguous multi-app attribution.
-        val exactWatchPackage = TrackerShieldRuleStore.exactWatchPackage(this)
-        val protectedPackages = (
-            exactWatchPackage?.let { setOf(it) }
-                ?: TrackerShieldRuleStore.protectedPackages(this)
-            )
+        // Tracker Shield protects every app the user selected. Exact Watch metadata
+        // must never narrow that saved set to one app: Android's VPN TUN does not
+        // expose a reliable per-packet app UID here, so a shared session is reported
+        // as shared rather than falsely assigning its DNS events to the watch target.
+        val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
             .filterNot { it == packageName }
             .toSet()
 
