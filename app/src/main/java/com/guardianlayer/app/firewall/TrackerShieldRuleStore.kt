@@ -43,10 +43,12 @@ object TrackerShieldRuleStore {
         if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) {
             editor.putStringSet(KEY_EXACT_WATCH_BACKUP, protectedPackages(context))
         }
+        // The active Exact Watch target is metadata for a focused report, not the
+        // user's protection configuration. Keep KEY_PACKAGES unchanged so starting
+        // a watch cannot silently deselect every other Shielded app.
         editor
             .putBoolean(KEY_EXACT_WATCH_ACTIVE, true)
             .putString(KEY_EXACT_WATCH_PACKAGE, packageName)
-            .putStringSet(KEY_PACKAGES, setOf(packageName))
             .apply()
     }
 
