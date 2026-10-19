@@ -31,45 +31,43 @@ Vscan remains a separate private scanner/security-engine project. Guardian does 
 - Gradle 8.11.1
 - Application ID: `com.guardianlayer.app`
 
-## Current milestone: 0.2.0-alpha
+## Current milestone: 0.7.2-alpha
 
-Guardian now has two real VPN protection modes:
+Installable test build. Not a Play Store release. The debug APK is signed with the repo's debug key so later CI builds can update the same test install. Package id: `com.guardianlayer.app.debug`.
 
 ### Emergency Lock Down
 
 Lock Down routes device traffic into Guardian's local VPN and discards it. Guardian itself is excluded so the user can always return to the control app and stop protection.
 
-### Selective per-app firewall
+### Smart Firewall
 
-The user can mark visible launcher apps as **BLOCKED**. When the Smart Firewall is active, only those selected packages are attached to Guardian's VPN via Android `VpnService.Builder.addAllowedApplication(...)`. Their packets are discarded, while unselected apps remain on Android's normal network route.
+Mark launcher apps **BLOCKED**. Only those packages are attached to the VPN, and their packets are discarded. Other apps stay on Android's normal route. This is real per-app blocking, not a full userspace TCP/UDP forwarder.
 
-This provides genuine per-app internet blocking without pretending Guardian already has a full userspace TCP/UDP forwarder.
+### Tracker Shield
 
-Current 0.2 behavior:
+Mark apps **SHIELDED**. Guardian filters ordinary DNS for those apps and leaves their other traffic online. Encrypted DNS, cached destinations, and direct-IP traffic can bypass it. A shared session is reported as shared. Guardian does not invent a per-app source when the tunnel carries more than one app.
 
-- Per-app BLOCK / ALLOW rules stored locally
-- Start / stop Smart Firewall independently of Lock Down
-- Rules can be changed while the firewall is running and are reapplied immediately
-- Foreground notification reports which protection mode is active
-- Guardian Timeline records rule changes and firewall state
-- Emergency Restore Network still stops any Guardian VPN mode
-- Stable debug signing allows future CI debug APKs to update the installed test build
+### Exact Watch
 
-## What 0.2 does not claim yet
+Watching one app keeps the saved Shielded set and temporarily routes only that app through Tracker Shield, so DNS from the test can be attributed to it. Restore puts every saved Shielded app back on the VPN. Hiding the live panel does not restart the test.
 
-Selective blocking is not the same thing as full connection monitoring. Guardian does not yet forward allowed traffic, inspect every connection, attribute destinations to apps, or perform tracker/domain filtering. Those require the next networking layer and will be added deliberately rather than mocked.
+## What 0.7.2 does not claim
+
+Guardian does not prove a device or app is malware-free. It does not inspect every connection, attribute destinations inside a multi-app tunnel, or ship a threat-hash scanner. Risk notes are review signals, not verdicts.
 
 ## Privacy boundary
 
 Guardian is local-first. Security events, firewall rules, and privacy-snapshot results remain on-device. No analytics SDK or remote scan upload is included.
 
-## Build
+## Install the test build
 
-Android Studio can import the repository directly. CI uses Gradle 8.11.1 and uploads the debug APK as a workflow artifact.
+Android Studio can import the repository directly. CI on `main` and `release/**` runs the unit tests and uploads `guardian-debug-apk`.
 
 ```bash
 ./gradlew :app:assembleDebug
 ```
+
+Sideload that debug APK on a device running Android 8 or newer. It will not replace a Play-signed Guardian install, because the test id ends in `.debug`. This debug key must never be used for a production release.
 
 ## Product rule
 

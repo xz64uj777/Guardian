@@ -35,27 +35,25 @@ object TrackerShieldRuleStore {
             .apply()
     }
 
-
     fun beginExactWatch(context: Context, packageName: String) {
         if (packageName.isBlank()) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val editor = prefs.edit()
-        if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) {
-            editor.putStringSet(KEY_EXACT_WATCH_BACKUP, protectedPackages(context))
-        }
-        // The active Exact Watch target is metadata for a focused report, not the
-        // user's protection configuration. Keep KEY_PACKAGES unchanged so starting
-        // a watch cannot silently deselect every other Shielded app.
-        editor
             .putBoolean(KEY_EXACT_WATCH_ACTIVE, true)
             .putString(KEY_EXACT_WATCH_PACKAGE, packageName)
-            .apply()
+        // A new watch must not snapshot or replace the saved Shielded set.
+        // A backup left by an already-active older build is kept so Restore can
+        // recover that selection once. A stale backup from a finished watch is dropped.
+        if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) {
+            editor.remove(KEY_EXACT_WATCH_BACKUP)
+        }
+        editor.commit()
     }
 
     fun exactWatchPackage(context: Context): String? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) return null
-        return prefs.getString(KEY_EXACT_WATCH_PACKAGE, null)
+        return prefs.getString(KEY_EXACT_WATCH_PACKAGE, null)?.takeIf { it.isNotBlank() }
     }
 
     fun hasExactWatchBackup(context: Context): Boolean =
@@ -65,17 +63,20 @@ object TrackerShieldRuleStore {
     fun restoreAfterExactWatch(context: Context): Set<String>? {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) return null
-        val restored = prefs.getStringSet(KEY_EXACT_WATCH_BACKUP, emptySet())
+        val legacyBackup = prefs.getStringSet(KEY_EXACT_WATCH_BACKUP, null)
             ?.filter { it.isNotBlank() }
             ?.toSet()
-            ?: emptySet()
-        prefs.edit()
-            .putStringSet(KEY_PACKAGES, restored)
+        val editor = prefs.edit()
             .remove(KEY_EXACT_WATCH_ACTIVE)
             .remove(KEY_EXACT_WATCH_PACKAGE)
             .remove(KEY_EXACT_WATCH_BACKUP)
-            .apply()
-        return restored
+        // Older builds replaced the saved set with the watched app and kept the
+        // real selection in this backup. Apply that once, then never again.
+        if (legacyBackup != null) {
+            editor.putStringSet(KEY_PACKAGES, legacyBackup)
+        }
+        editor.commit()
+        return protectedPackages(context)
     }
 
     fun protectedCount(context: Context): Int = protectedPackages(context).size

@@ -67,6 +67,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
+    private var baselinePackageName: String? = null
     private var frozenAt = 0L
     private var frozenDecisions = 0L
     private var frozenBlocked = 0L
@@ -100,6 +101,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = savedInstanceState?.getLong("baselineDecisions") ?: 0L
         baselineBlocked = savedInstanceState?.getLong("baselineBlocked") ?: 0L
         baselineStartedAt = savedInstanceState?.getLong("baselineStartedAt") ?: 0L
+        baselinePackageName = savedInstanceState?.getString("baselinePackageName")
         frozenAt = savedInstanceState?.getLong("frozenAt") ?: 0L
         frozenDecisions = savedInstanceState?.getLong("frozenDecisions") ?: 0L
         frozenBlocked = savedInstanceState?.getLong("frozenBlocked") ?: 0L
@@ -131,6 +133,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putLong("baselineDecisions", baselineDecisions)
         outState.putLong("baselineBlocked", baselineBlocked)
         outState.putLong("baselineStartedAt", baselineStartedAt)
+        outState.putString("baselinePackageName", baselinePackageName)
         outState.putLong("frozenAt", frozenAt)
         outState.putLong("frozenDecisions", frozenDecisions)
         outState.putLong("frozenBlocked", frozenBlocked)
@@ -262,7 +265,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         when (GuardianVpnService.currentMode()) {
             GuardianVpnService.Mode.TRACKER_SHIELD -> {
                 startTrackerShield()
-                Toast.makeText(this, "Exact watch switching to this app", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Exact Watch is routing only this app", Toast.LENGTH_SHORT).show()
             }
             GuardianVpnService.Mode.OFF -> {
                 val prepare = VpnService.prepare(this)
@@ -309,7 +312,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val count = restored.size
         Toast.makeText(
             this,
-            if (count == 0) "Normal shield restored: no apps selected" else "Normal shield restored: $count app(s)",
+            if (count == 0) "Exact Watch ended. No Shielded apps saved." else "Exact Watch ended. $count Shielded app(s) kept.",
             Toast.LENGTH_SHORT
         ).show()
         refreshSummary()
@@ -393,6 +396,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
         baselineBlocked = profile?.blockedDecisions ?: 0L
         baselineStartedAt = System.currentTimeMillis()
+        baselinePackageName = packageName
         frozenAt = 0L
         frozenDecisions = 0L
         frozenBlocked = 0L
@@ -529,17 +533,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         details.setOnClickListener {
             if (expandedPackageName == app.packageName) {
+                // Hiding the details panel must not restart an ongoing Exact Watch test.
                 expandedPackageName = null
-                baselineDecisions = 0L
-                baselineBlocked = 0L
-                baselineStartedAt = 0L
-                frozenAt = 0L
-                frozenDecisions = 0L
-                frozenBlocked = 0L
-                frozenReportText = null
             } else {
                 expandedPackageName = app.packageName
-                resetLiveWindow(app.packageName)
+                // Keep this app's baseline when returning to its panel; only a deliberate
+                // new test or switching to another app should create a fresh baseline.
+                if (baselineStartedAt == 0L || baselinePackageName != app.packageName) {
+                    resetLiveWindow(app.packageName)
+                }
             }
             renderApps()
             restartLiveRefresh()
@@ -986,9 +988,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
             }.top(dp(12)))
             panel.addView(text(
                 when {
-                    sharedShieldSession -> "This will replace the shared Tracker Shield selection with only ${app.label} so Guardian can attribute its DNS activity exactly."
-                    GuardianVpnService.currentMode() == GuardianVpnService.Mode.OFF -> "This will make ${app.label} the only shielded app and start Tracker Shield after Android VPN permission if needed."
-                    else -> "This saves ${app.label} as the only shielded app. Guardian will not replace Firewall or Lock Down automatically."
+                    GuardianVpnService.currentMode() == GuardianVpnService.Mode.FIREWALL ||
+                        GuardianVpnService.currentMode() == GuardianVpnService.Mode.LOCKDOWN ->
+                        "This keeps your saved Shielded apps and marks ${app.label} for Exact Watch. Stop the current mode, then start Tracker Shield. Guardian will route only this app until you restore."
+                    else ->
+                        "This keeps your saved Shielded apps and temporarily routes only ${app.label} through Tracker Shield, so its DNS can be attributed exactly. Restore puts every saved Shielded app back on the VPN."
                 },
                 11f,
                 secondary,
@@ -1020,7 +1024,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 setOnClickListener { restoreNormalShield() }
             }.top(dp(12)))
             panel.addView(text(
-                "Guardian saved your previous Tracker Shield app selection before Exact Watch. Restore it when this test is finished.",
+                "Ends this Exact Watch and puts every saved Shielded app back on Tracker Shield. The saved selection is not rewritten.",
                 11f,
                 secondary,
                 Typeface.NORMAL
@@ -1104,7 +1108,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val mode = GuardianVpnService.currentMode()
         val note = when {
             TrackerShieldRuleStore.hasExactWatchBackup(this) ->
-                "EXACT WATCH is active. Your normal Tracker Shield selection is saved and can be restored from the watched app."
+                "EXACT WATCH is routing only the watched app. Saved Shielded apps are unchanged. Restore from that app to return the full shield."
             mode == GuardianVpnService.Mode.FIREWALL || mode == GuardianVpnService.Mode.TRACKER_SHIELD ->
                 "Saved selection only. Return Home and use APPLY TO CURRENT MODE if shown; changes do not alter the running VPN until applied."
             mode == GuardianVpnService.Mode.LOCKDOWN ->

@@ -323,15 +323,16 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startTrackerShield() {
-        // Tracker Shield protects every app the user selected. Exact Watch metadata
-        // must never narrow that saved set to one app: Android's VPN TUN does not
-        // expose a reliable per-packet app UID here, so a shared session is reported
-        // as shared rather than falsely assigning its DNS events to the watch target.
-        val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
-            .filterNot { it == packageName }
-            .toSet()
+        // Exact Watch narrows the live VPN only. The saved Shielded set stays put.
+        // A shared session still cannot attribute a packet to one app, so it is
+        // reported as shared rather than pinned on the watch target.
+        val sessionPackages = TrackerShieldSession.vpnPackages(
+            saved = TrackerShieldRuleStore.protectedPackages(this),
+            exactWatchPackage = TrackerShieldRuleStore.exactWatchPackage(this),
+            selfPackage = packageName
+        )
 
-        if (protectedPackages.isEmpty()) {
+        if (sessionPackages.isEmpty()) {
             stopVpn(logEvent = false)
             GuardianEventStore.append(
                 this,
@@ -344,7 +345,7 @@ class GuardianVpnService : VpnService() {
         }
 
         val upstream = resolveUpstreamDns()
-        rebuildTrackerShield(protectedPackages, upstream)
+        rebuildTrackerShield(sessionPackages, upstream)
     }
 
     @Synchronized
@@ -470,7 +471,11 @@ class GuardianVpnService : VpnService() {
             return
         }
 
-        startForegroundCompat(Mode.TRACKER_SHIELD, effectivePackages.size)
+        val watchPackage = TrackerShieldRuleStore.exactWatchPackage(this)
+        val exactWatch = watchPackage != null &&
+            effectivePackages.size == 1 &&
+            effectivePackages.single() == watchPackage
+        startForegroundCompat(Mode.TRACKER_SHIELD, effectivePackages.size, exactWatch)
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
             failToStart(
@@ -495,11 +500,17 @@ class GuardianVpnService : VpnService() {
         } else {
             " Android did not accept Guardian's split-routing request, so non-DNS packets may still appear as unsupported."
         }
+        val shieldDetail = if (exactWatch) {
+            val label = appLabel(effectivePackages.single())
+            "Exact Watch is filtering ordinary DNS for $label only. Saved Shielded apps stay selected and are not in this VPN session."
+        } else {
+            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s)."
+        }
         GuardianEventStore.append(
             this,
             "INFO",
-            "Tracker Shield activated",
-            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online.$routingNote Encrypted DNS, cached destinations, and direct-IP traffic may bypass this DNS-only shield."
+            if (exactWatch) "Exact Watch activated" else "Tracker Shield activated",
+            "$shieldDetail Normal app traffic bypasses the VPN so the apps can stay online.$routingNote Encrypted DNS, cached destinations, and direct-IP traffic may bypass this DNS-only shield."
         )
 
         startTrackerDnsLoop(upstreamDns)
@@ -931,7 +942,7 @@ class GuardianVpnService : VpnService() {
         }
     }
 
-    private fun startForegroundCompat(targetMode: Mode, appCount: Int) {
+    private fun startForegroundCompat(targetMode: Mode, appCount: Int, exactWatch: Boolean = false) {
         val openApp = PendingIntent.getActivity(
             this,
             0,
@@ -948,13 +959,17 @@ class GuardianVpnService : VpnService() {
         val title = when (targetMode) {
             Mode.LOCKDOWN -> "Guardian Lock Down is active"
             Mode.FIREWALL -> "Guardian Firewall is active"
-            Mode.TRACKER_SHIELD -> "Guardian Tracker Shield is active"
+            Mode.TRACKER_SHIELD -> if (exactWatch) "Guardian Exact Watch is active" else "Guardian Tracker Shield is active"
             Mode.OFF -> "Guardian"
         }
         val body = when (targetMode) {
             Mode.LOCKDOWN -> "Device network traffic is blocked until you stop Lock Down."
             Mode.FIREWALL -> "Blocking network access for $appCount selected app(s)."
-            Mode.TRACKER_SHIELD -> "Filtering visible DNS trackers for $appCount selected app(s) while normal traffic stays online."
+            Mode.TRACKER_SHIELD -> if (exactWatch) {
+                "Filtering DNS for the watched app only. Saved Shielded apps are unchanged."
+            } else {
+                "Filtering visible DNS trackers for $appCount selected app(s) while normal traffic stays online."
+            }
             Mode.OFF -> "Guardian network protection."
         }
 
