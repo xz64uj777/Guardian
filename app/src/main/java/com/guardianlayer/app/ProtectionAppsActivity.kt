@@ -72,6 +72,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var frozenBlocked = 0L
     private var frozenReportText: String? = null
     private var pendingExactWatchPackage: String? = null
+    private var pendingMultiAppWatch = false
     private var expandedPanelHost: LinearLayout? = null
     private val liveHandler = Handler(Looper.getMainLooper())
     private val liveRefresh = object : Runnable {
@@ -105,6 +106,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenBlocked = savedInstanceState?.getLong("frozenBlocked") ?: 0L
         frozenReportText = savedInstanceState?.getString("frozenReportText")
         pendingExactWatchPackage = savedInstanceState?.getString("pendingExactWatchPackage")
+        pendingMultiAppWatch = savedInstanceState?.getBoolean("pendingMultiAppWatch") ?: false
         title = "Guardian Protection Apps"
         setContentView(buildUi())
         loadApps()
@@ -136,6 +138,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         outState.putLong("frozenBlocked", frozenBlocked)
         outState.putString("frozenReportText", frozenReportText)
         outState.putString("pendingExactWatchPackage", pendingExactWatchPackage)
+        outState.putBoolean("pendingMultiAppWatch", pendingMultiAppWatch)
         super.onSaveInstanceState(outState)
     }
 
@@ -297,6 +300,20 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
 
         expandedPackageName?.let { resetLiveWindow(it) }
+        if (currentMode == GuardianVpnService.Mode.OFF) {
+            val prepare = VpnService.prepare(this)
+            if (prepare != null) {
+                pendingMultiAppWatch = true
+                @Suppress("DEPRECATION")
+                startActivityForResult(prepare, 904)
+                Toast.makeText(
+                    this,
+                    "Allow Guardian's VPN connection to start multi-app Tracker Shield.",
+                    Toast.LENGTH_LONG
+                ).show()
+                return
+            }
+        }
         startTrackerShield()
         Toast.makeText(
             this,
@@ -439,6 +456,17 @@ class ProtectionAppsActivity : AppCompatActivity() {
             pendingExactWatchPackage = null
             if (resultCode == RESULT_OK && packageName != null) {
                 startTrackerShield()
+            }
+        } else if (requestCode == 904) {
+            val shouldStart = pendingMultiAppWatch
+            pendingMultiAppWatch = false
+            if (resultCode == RESULT_OK && shouldStart) {
+                startTrackerShield()
+                refreshSummary()
+                renderApps()
+                restartLiveRefresh()
+            } else if (shouldStart) {
+                Toast.makeText(this, "VPN permission was not granted; multi-app Tracker Shield was not started.", Toast.LENGTH_LONG).show()
             }
         }
     }
