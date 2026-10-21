@@ -156,6 +156,18 @@ class ProtectionAppsActivity : AppCompatActivity() {
             }
             addView(summary.top(dp(20)))
 
+            addView(MaterialButton(this@ProtectionAppsActivity).apply {
+                text = "WATCH ALL SELECTED APPS"
+                minHeight = dp(46)
+                setOnClickListener { watchSelectedAppsTogether() }
+            }.top(dp(9)))
+            addView(text(
+                "Keeps every selected Shield app in one session. Guardian will show separate per-app live data only when Android identifies each DNS flow owner; otherwise it will mark that app as unattributed.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(3)))
+
             burstAlertsButton = MaterialButton(this@ProtectionAppsActivity).apply {
                 minHeight = dp(44)
                 setOnClickListener { toggleBurstAlerts() }
@@ -254,6 +266,46 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val active = GuardianVpnService.activeRulePackages()
         return active.size > 1 && packageName in active &&
             !GuardianVpnService.hasExactAttributionFor(packageName)
+    }
+
+    private fun watchSelectedAppsTogether() {
+        val currentMode = GuardianVpnService.currentMode()
+        if (currentMode != GuardianVpnService.Mode.OFF &&
+            currentMode != GuardianVpnService.Mode.TRACKER_SHIELD
+        ) {
+            Toast.makeText(
+                this,
+                "Stop Firewall or Lock Down before starting multi-app Tracker Shield.",
+                Toast.LENGTH_LONG
+            ).show()
+            return
+        }
+
+        // Ending a temporary one-app Exact Watch restores the user's saved
+        // multi-app selection before the VPN is restarted.
+        val restored = TrackerShieldRuleStore.restoreAfterExactWatch(this)
+        val selected = restored ?: apps
+            .filter { TrackerShieldRuleStore.isProtected(this, it.packageName) }
+            .map { it.packageName }
+            .toSet()
+
+        if (selected.isEmpty()) {
+            Toast.makeText(this, "Select at least one app with SHIELD first.", Toast.LENGTH_LONG).show()
+            refreshSummary()
+            renderApps()
+            return
+        }
+
+        expandedPackageName?.let { resetLiveWindow(it) }
+        startTrackerShield()
+        Toast.makeText(
+            this,
+            "Multi-app Tracker Shield starting for ${selected.size} selected app(s).",
+            Toast.LENGTH_LONG
+        ).show()
+        refreshSummary()
+        renderApps()
+        restartLiveRefresh()
     }
 
     private fun requestExactWatch(packageName: String) {
