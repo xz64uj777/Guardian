@@ -1197,8 +1197,8 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         val attribution = GuardianVpnService.attributionSnapshot()
         val captureStatus = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
-            "\\nVPN DNS diagnostic: ${attribution.capturedDnsQueries} captured · ${attribution.exactlyAttributedQueries} exact · ${attribution.unattributedSharedQueries} shared/unattributed" +
-                if (attribution.lastOwnerUid >= 0L) "\\nLast DNS flow owner UID: ${attribution.lastOwnerUid}" else ""
+            "\nVPN DNS diagnostic: ${attribution.capturedDnsQueries} captured · ${attribution.exactlyAttributedQueries} exact · ${attribution.unattributedSharedQueries} shared/unattributed" +
+                if (attribution.lastOwnerUid >= 0L) "\nLast DNS flow owner UID: ${attribution.lastOwnerUid}" else ""
         } else ""
         summary.text = "SMART FIREWALL  $blocked app(s)\nTRACKER SHIELD  $shielded app(s)\n\n$note$captureStatus"
         summary.setTextColor(if ((preferredMode == MODE_FIREWALL && blocked > 0) || (preferredMode == MODE_SHIELD && shielded > 0)) green else primary)
