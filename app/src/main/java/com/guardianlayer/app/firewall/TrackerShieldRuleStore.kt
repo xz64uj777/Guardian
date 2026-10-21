@@ -10,17 +10,34 @@ object TrackerShieldRuleStore {
     private const val KEY_EXACT_WATCH_PACKAGE = "exact_watch_package"
     private const val KEY_EXACT_WATCH_BACKUP = "exact_watch_backup_packages"
 
-    fun protectedPackages(context: Context): Set<String> =
+    /** The user's persisted multi-app selection, independent of a temporary Exact Watch. */
+    private fun savedProtectedPackages(context: Context): Set<String> =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getStringSet(KEY_PACKAGES, emptySet())
             ?.toSet()
             ?: emptySet()
 
+    /**
+     * Packages to attach to the current Tracker Shield VPN.
+     * During Exact Watch, attach only the target app so the service can safely
+     * attribute DNS events to that one package. The saved multi-app selection
+     * remains intact and is restored when Exact Watch ends.
+     */
+    fun protectedPackages(context: Context): Set<String> {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) {
+            prefs.getString(KEY_EXACT_WATCH_PACKAGE, null)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { return setOf(it) }
+        }
+        return savedProtectedPackages(context)
+    }
+
     fun isProtected(context: Context, packageName: String): Boolean =
-        protectedPackages(context).contains(packageName)
+        savedProtectedPackages(context).contains(packageName)
 
     fun setProtected(context: Context, packageName: String, protected: Boolean) {
-        val next = protectedPackages(context).toMutableSet()
+        val next = savedProtectedPackages(context).toMutableSet()
         if (protected) next.add(packageName) else next.remove(packageName)
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit()
@@ -35,17 +52,13 @@ object TrackerShieldRuleStore {
             .apply()
     }
 
-
     fun beginExactWatch(context: Context, packageName: String) {
         if (packageName.isBlank()) return
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val editor = prefs.edit()
         if (!prefs.getBoolean(KEY_EXACT_WATCH_ACTIVE, false)) {
-            editor.putStringSet(KEY_EXACT_WATCH_BACKUP, protectedPackages(context))
+            editor.putStringSet(KEY_EXACT_WATCH_BACKUP, savedProtectedPackages(context))
         }
-        // The active Exact Watch target is metadata for a focused report, not the
-        // user's protection configuration. Keep KEY_PACKAGES unchanged so starting
-        // a watch cannot silently deselect every other Shielded app.
         editor
             .putBoolean(KEY_EXACT_WATCH_ACTIVE, true)
             .putString(KEY_EXACT_WATCH_PACKAGE, packageName)
