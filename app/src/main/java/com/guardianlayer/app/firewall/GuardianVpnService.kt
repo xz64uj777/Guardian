@@ -23,6 +23,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.ArrayDeque
 import java.util.LinkedHashSet
@@ -118,6 +119,7 @@ class GuardianVpnService : VpnService() {
         private val recentDrops = ArrayDeque<TrafficDrop>()
         private val recentDns = ArrayDeque<DnsActivity>()
         private val trackerBlockCounts = linkedMapOf<String, TrackerDomainStat>()
+        private val exactAttributedPackages = linkedSetOf<String>()
 
         fun isRunning(): Boolean = mode != Mode.OFF
         fun currentMode(): Mode = mode
@@ -127,6 +129,11 @@ class GuardianVpnService : VpnService() {
 
         /** Selection captured when the current VPN was established, not pending edits. */
         fun activeRulePackages(): Set<String> = activeRules.toSet()
+
+        /** True only after this active VPN session has attributed at least one DNS query to the app. */
+        fun hasExactAttributionFor(packageName: String): Boolean = synchronized(trafficLock) {
+            packageName in exactAttributedPackages
+        }
 
         fun trafficSnapshot(): TrafficSnapshot {
             val snapshotData = synchronized(trafficLock) {
@@ -178,6 +185,7 @@ class GuardianVpnService : VpnService() {
                 recentDrops.clear()
                 recentDns.clear()
                 trackerBlockCounts.clear()
+                exactAttributedPackages.clear()
             }
         }
 
@@ -597,7 +605,10 @@ class GuardianVpnService : VpnService() {
                     dnsQueries.incrementAndGet()
                     lastActivityAt.set(System.currentTimeMillis())
                     val classification = TrackerDomainClassifier.classify(request.domain)
-                    val sourcePackage = activeVpnPackages.singleOrNull()
+                    val sourcePackage = resolveDnsSourcePackage(request)
+                    if (sourcePackage != null) {
+                        synchronized(trafficLock) { exactAttributedPackages.add(sourcePackage) }
+                    }
                     val sourceLabel = sourcePackage?.let(::appLabel)
                         ?: "One of ${activeVpnPackages.size} shielded apps"
 
@@ -682,6 +693,37 @@ class GuardianVpnService : VpnService() {
             isDaemon = true
             start()
         }
+    }
+
+    /**
+     * Resolve the owner of a DNS UDP flow while it is inside Guardian's VPN.
+     * Android Q+ exposes this specifically for VPN connection attribution. If the
+     * owner cannot be resolved uniquely among selected apps, keep it unattributed;
+     * never assign a shared-session query to an arbitrary app.
+     */
+    private fun resolveDnsSourcePackage(request: DnsPacketCodec.Request): String? {
+        if (activeVpnPackages.size == 1) return activeVpnPackages.single()
+        if (activeVpnPackages.size < 2 || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+
+        val ownerUid = runCatching {
+            val local = InetSocketAddress(
+                InetAddress.getByAddress(request.sourceAddress),
+                request.sourcePort
+            )
+            val remote = InetSocketAddress(
+                InetAddress.getByAddress(request.destinationAddress),
+                request.destinationPort
+            )
+            getSystemService(ConnectivityManager::class.java)
+                .getConnectionOwnerUid(OsConstants.IPPROTO_UDP, local, remote)
+        }.getOrNull()?.takeIf { it >= 0 } ?: return null
+
+        val matchingPackages = activeVpnPackages.filter { selectedPackage ->
+            runCatching {
+                packageManager.getApplicationInfo(selectedPackage, 0).uid == ownerUid
+            }.getOrDefault(false)
+        }
+        return matchingPackages.singleOrNull()
     }
 
     private fun forwardDns(
