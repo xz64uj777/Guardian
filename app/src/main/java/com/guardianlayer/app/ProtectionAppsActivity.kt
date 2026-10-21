@@ -244,13 +244,16 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private fun isExactLive(packageName: String): Boolean {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
-        return active.size == 1 && packageName in active
+        return packageName in active && (
+            active.size == 1 || GuardianVpnService.hasExactAttributionFor(packageName)
+        )
     }
 
     private fun isSharedShieldSession(packageName: String): Boolean {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
-        return active.size > 1 && packageName in active
+        return active.size > 1 && packageName in active &&
+            !GuardianVpnService.hasExactAttributionFor(packageName)
     }
 
     private fun requestExactWatch(packageName: String) {
@@ -678,8 +681,8 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val activeRules = GuardianVpnService.activeRulePackages()
         val exactState = if (
             GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
-            activeRules.size == 1 &&
-            app.packageName in activeRules
+            app.packageName in activeRules &&
+            (activeRules.size == 1 || GuardianVpnService.hasExactAttributionFor(app.packageName))
         ) "EXACT LIVE" else "NOT EXACT LIVE"
 
         val recent = profile.recentDecisions
@@ -784,9 +787,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
         panel.addView(text(if (liveMode) "APP ACTIVITY  •  LIVE" else "APP ACTIVITY", 12f, if (liveMode) green else violet, Typeface.BOLD))
         panel.addView(text(
             when {
-                liveMode -> "Updating every 2 seconds while this panel is open. The live test window keeps counting while you switch to the app and come back."
-                sharedShieldSession -> "Tracker Shield is protecting multiple apps. Guardian will not claim exact per-app live attribution in this shared session."
-                else -> "Live exact attribution requires Tracker Shield to be running with only this app in the active shield session."
+                liveMode -> "Updating every 2 seconds while this panel is open. In a multi-app session, exact status appears only after Android identifies this app as the DNS flow owner."
+                sharedShieldSession -> "Tracker Shield is protecting multiple apps. Guardian is checking Android's VPN flow-owner information; this app remains unattributed until that lookup succeeds."
+                else -> "Live exact attribution requires this app to be active in Tracker Shield. In multi-app sessions, Android must also identify the DNS flow owner."
             },
             11f,
             secondary,
@@ -795,7 +798,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
         if (profile == null || profile.cumulativeDecisions <= 0L) {
             panel.addView(text("No exact traffic history is available for ${app.label} yet. Guardian records per-app DNS history only when attribution is confident; an empty history does not mean the app made no network connections.", 13f, secondary, Typeface.NORMAL).top(dp(7)))
-            panel.addView(text("Try running Tracker Shield with this app selected, use the app normally, then keep this panel open.", 12f, primary, Typeface.BOLD).top(dp(8)))
+            panel.addView(text("Use the app normally while Tracker Shield runs. With multiple selected apps, Guardian will show exact activity only when Android's VPN flow-owner lookup identifies the app.", 12f, primary, Typeface.BOLD).top(dp(8)))
         } else {
             val number = NumberFormat.getIntegerInstance()
             val now = System.currentTimeMillis()
@@ -812,7 +815,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
             }
             val rightNowState = when {
                 !liveMode && sharedShieldSession ->
-                    "NOT EXACT LIVE  •  This is a shared Tracker Shield session. Use one active shielded app for exact per-app RIGHT NOW activity."
+                    "NOT EXACT LIVE  •  Guardian has not yet attributed this app's DNS flow in the shared session. Its traffic is not guessed or mixed into another app's report."
                 !liveMode ->
                     "NOT LIVE  •  Exact per-app monitoring is not active for this app right now. Last exact activity ${age(profile.lastSeenAt)}."
                 rightNow.decisions == 0L ->
