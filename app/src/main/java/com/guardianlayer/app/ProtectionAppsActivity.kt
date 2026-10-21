@@ -64,6 +64,12 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var loading = true
     private var preferredMode: String = MODE_FIREWALL
     private var expandedPackageName: String? = null
+    private data class WatchBaseline(
+        val decisions: Long,
+        val blocked: Long,
+        val startedAt: Long
+    )
+    private val watchBaselines = mutableMapOf<String, WatchBaseline>()
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
@@ -221,7 +227,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 loading = false
                 apps = result.getOrDefault(emptyList())
-                if (expandedPackageName != null && baselineStartedAt == 0L) resetLiveWindow(expandedPackageName!!)
+                if (expandedPackageName != null && baselineStartedAt == 0L) activateLiveWindow(expandedPackageName!!)
                 renderApps()
                 if (result.isFailure) {
                     list.removeAllViews()
@@ -257,10 +263,14 @@ class ProtectionAppsActivity : AppCompatActivity() {
     }
 
     private fun requestExactWatch(packageName: String) {
+        // Preserve each app's test start when the user switches between apps.
+        // Otherwise every return to an app resets its baseline to the latest total,
+        // making the report say 0 DNS even though the app was active moments earlier.
+        expandedPackageName?.takeIf { it != packageName }?.let(::saveWatchBaseline)
         TrackerShieldRuleStore.beginExactWatch(this, packageName)
         FirewallRuleStore.setBlocked(this, packageName, false)
         expandedPackageName = packageName
-        resetLiveWindow(packageName)
+        activateLiveWindow(packageName)
 
         when (GuardianVpnService.currentMode()) {
             GuardianVpnService.Mode.TRACKER_SHIELD -> {
@@ -391,6 +401,30 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveWatchBaseline(packageName: String) {
+        if (baselineStartedAt <= 0L) return
+        watchBaselines[packageName] = WatchBaseline(
+            decisions = baselineDecisions,
+            blocked = baselineBlocked,
+            startedAt = baselineStartedAt
+        )
+    }
+
+    private fun activateLiveWindow(packageName: String) {
+        val saved = watchBaselines[packageName]
+        if (saved == null) {
+            resetLiveWindow(packageName)
+            return
+        }
+        baselineDecisions = saved.decisions
+        baselineBlocked = saved.blocked
+        baselineStartedAt = saved.startedAt
+        frozenAt = 0L
+        frozenDecisions = 0L
+        frozenBlocked = 0L
+        frozenReportText = null
+    }
+
     private fun resetLiveWindow(packageName: String) {
         val profile = TrackerActivityStore.profile(this, packageName)
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
@@ -400,6 +434,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenDecisions = 0L
         frozenBlocked = 0L
         frozenReportText = null
+        saveWatchBaseline(packageName)
     }
 
     private fun freezeLiveWindow(app: FirewallApp) {
@@ -541,8 +576,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 frozenBlocked = 0L
                 frozenReportText = null
             } else {
+                expandedPackageName?.takeIf { it != app.packageName }?.let(::saveWatchBaseline)
                 expandedPackageName = app.packageName
-                resetLiveWindow(app.packageName)
+                activateLiveWindow(app.packageName)
             }
             renderApps()
             restartLiveRefresh()
