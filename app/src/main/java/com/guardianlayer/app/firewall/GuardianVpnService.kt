@@ -323,6 +323,10 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startTrackerShield() {
+        // Tracker Shield protects every app the user selected. Exact Watch metadata
+        // must never narrow that saved set to one app: Android's VPN TUN does not
+        // expose a reliable per-packet app UID here, so a shared session is reported
+        // as shared rather than falsely assigning its DNS events to the watch target.
         val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
             .filterNot { it == packageName }
             .toSet()
