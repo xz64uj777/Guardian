@@ -763,7 +763,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
             GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
             app.packageName in activeRules &&
             (activeRules.size == 1 || GuardianVpnService.hasExactAttributionFor(app.packageName))
-        ) "EXACT LIVE" else "NOT EXACT LIVE"
+        ) when {
+            rightNow.decisions > 0L -> "EXACT LIVE · activity seen in last 60 sec"
+            deltaDecisions > 0L -> "EXACT WATCH · activity seen during this watch"
+            else -> "EXACT WATCH · no activity observed yet"
+        } else "NOT EXACT LIVE"
 
         val recent = profile.recentDecisions
             .filter { baselineStartedAt <= 0L || it.lastSeenAt >= baselineStartedAt }
