@@ -1205,9 +1205,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
             val topDomains = traffic.topTrackerBlocks.take(3)
                 .joinToString(", ") { "${it.domain} (${it.count})" }
             "\nSHARED SESSION TOTALS: ${traffic.dnsQueries} DNS · ${traffic.trackerQueriesBlocked} blocked · ${traffic.dnsQueriesForwarded} forwarded" +
-                if (topDomains.isBlank()) "" else "\nTop blocked domains: $topDomains" +
-            "\nVPN DNS diagnostic: ${attribution.capturedDnsQueries} captured · ${attribution.exactlyAttributedQueries} exact · ${attribution.unattributedSharedQueries} shared/unattributed" +
-                if (attribution.lastOwnerUid >= 0L) "\nLast DNS flow owner UID: ${attribution.lastOwnerUid}" else ""
+                (if (topDomains.isBlank()) "" else "\nTop blocked domains: $topDomains") +
+                "\nVPN DNS diagnostic: ${attribution.capturedDnsQueries} captured · ${attribution.exactlyAttributedQueries} exact · ${attribution.unattributedSharedQueries} shared/unattributed" +
+                (if (attribution.lastOwnerUid >= 0L) "\nLast DNS flow owner UID: ${attribution.lastOwnerUid}" else "")
         } else ""
         summary.text = "SMART FIREWALL  $blocked app(s)\nTRACKER SHIELD  $shielded app(s)\n\n$note$captureStatus"
         summary.setTextColor(if ((preferredMode == MODE_FIREWALL && blocked > 0) || (preferredMode == MODE_SHIELD && shielded > 0)) green else primary)
