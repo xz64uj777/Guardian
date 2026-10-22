@@ -1201,6 +1201,11 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
         val attribution = GuardianVpnService.attributionSnapshot()
         val captureStatus = if (mode == GuardianVpnService.Mode.TRACKER_SHIELD) {
+            val traffic = GuardianVpnService.trafficSnapshot()
+            val topDomains = traffic.topTrackerBlocks.take(3)
+                .joinToString(", ") { "${it.domain} (${it.count})" }
+            "\nSHARED SESSION TOTALS: ${traffic.dnsQueries} DNS · ${traffic.trackerQueriesBlocked} blocked · ${traffic.dnsQueriesForwarded} forwarded" +
+                if (topDomains.isBlank()) "" else "\nTop blocked domains: $topDomains" +
             "\nVPN DNS diagnostic: ${attribution.capturedDnsQueries} captured · ${attribution.exactlyAttributedQueries} exact · ${attribution.unattributedSharedQueries} shared/unattributed" +
                 if (attribution.lastOwnerUid >= 0L) "\nLast DNS flow owner UID: ${attribution.lastOwnerUid}" else ""
         } else ""
