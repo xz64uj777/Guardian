@@ -216,6 +216,18 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 }
             }.top(dp(6)))
 
+            addView(MaterialButton(this@ProtectionAppsActivity).apply {
+                text = "WATCH ALL SELECTED APPS"
+                minHeight = dp(44)
+                setOnClickListener { watchSelectedAppsTogether() }
+            }.top(dp(8)))
+            addView(text(
+                "Return to the full saved Tracker Shield selection after a one-app test. Guardian reports each app separately only when Android can identify its DNS flow owner.",
+                11f,
+                secondary,
+                Typeface.NORMAL
+            ).top(dp(4)))
+
             list = LinearLayout(this@ProtectionAppsActivity).apply { orientation = LinearLayout.VERTICAL }
             addView(list.top(dp(18)))
 
