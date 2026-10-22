@@ -759,12 +759,18 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val deltaBlocked = (profile.blockedDecisions - baselineBlocked).coerceAtLeast(0L)
         val deltaAllowed = (deltaDecisions - deltaBlocked).coerceAtLeast(0L)
         val activeRules = GuardianVpnService.activeRulePackages()
+        val sharedSession = GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
+            activeRules.size > 1
+        val attribution = GuardianVpnService.attributionSnapshot()
         val exactState = if (
             GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
             app.packageName in activeRules &&
             (activeRules.size == 1 || GuardianVpnService.hasExactAttributionFor(app.packageName))
         ) when {
-            rightNow.decisions > 0L -> "EXACT LIVE · activity seen in last 60 sec"
+            sharedSession && deltaDecisions == 0L && rightNow.decisions > 0L ->
+                "RECENT EXACT HISTORY · no new per-app events in this watch"
+            rightNow.decisions > 0L && profile.lastSeenAt >= baselineStartedAt ->
+                "EXACT LIVE · activity seen in last 60 sec"
             deltaDecisions > 0L -> "EXACT WATCH · activity seen during this watch"
             else -> "EXACT WATCH · no activity observed yet"
         } else "NOT EXACT LIVE"
@@ -799,6 +805,13 @@ class ProtectionAppsActivity : AppCompatActivity() {
                     "${number.format(deltaBlocked)} blocked · +" +
                     "${number.format(deltaAllowed)} allowed · started ${age(baselineStartedAt)}"
             )
+            if (sharedSession) {
+                appendLine(
+                    "Shared Shield diagnostics: ${number.format(attribution.capturedDnsQueries)} DNS captured · " +
+                        "${number.format(attribution.exactlyAttributedQueries)} exactly attributed · " +
+                        "${number.format(attribution.unattributedSharedQueries)} shared/unattributed"
+                )
+            }
             val watchEvidence = if (baselineStartedAt > 0L) {
                 TrackerActivityStore.windowDecisions(
                     this@ProtectionAppsActivity,
