@@ -94,9 +94,9 @@ class GuardianVpnService : VpnService() {
         private const val MAX_RECENT_DROPS = 12
         private const val MAX_RECENT_DNS = 20
         private const val VIRTUAL_DNS = "10.77.0.2"
-        private const val DNS_ATTEMPT_TIMEOUT_MS = 850
+        private const val DNS_ATTEMPT_TIMEOUT_MS = 500
         private const val DNS_RESPONSE_BUFFER_SIZE = 8192
-        private const val MAX_DNS_UPSTREAMS = 3
+        private const val MAX_DNS_UPSTREAMS = 2
 
         @Volatile
         private var mode = Mode.OFF
