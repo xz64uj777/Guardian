@@ -23,6 +23,7 @@ import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
 import java.net.InetAddress
+import java.net.InetSocketAddress
 import java.net.SocketTimeoutException
 import java.util.ArrayDeque
 import java.util.LinkedHashSet
@@ -56,6 +57,13 @@ class GuardianVpnService : VpnService() {
         val count: Long
     )
 
+    data class AttributionSnapshot(
+        val capturedDnsQueries: Long,
+        val exactlyAttributedQueries: Long,
+        val unattributedSharedQueries: Long,
+        val lastOwnerUid: Long
+    )
+
     data class TrafficSnapshot(
         val sessionMode: Mode,
         val packets: Long,
@@ -86,9 +94,9 @@ class GuardianVpnService : VpnService() {
         private const val MAX_RECENT_DROPS = 12
         private const val MAX_RECENT_DNS = 20
         private const val VIRTUAL_DNS = "10.77.0.2"
-        private const val DNS_ATTEMPT_TIMEOUT_MS = 850
+        private const val DNS_ATTEMPT_TIMEOUT_MS = 500
         private const val DNS_RESPONSE_BUFFER_SIZE = 8192
-        private const val MAX_DNS_UPSTREAMS = 3
+        private const val MAX_DNS_UPSTREAMS = 2
 
         @Volatile
         private var mode = Mode.OFF
@@ -113,11 +121,15 @@ class GuardianVpnService : VpnService() {
         private val dnsRetryRecoveries = AtomicLong(0)
         private val dnsAttemptTimeouts = AtomicLong(0)
         private val dnsIgnoredResponses = AtomicLong(0)
+        private val exactlyAttributedDnsQueries = AtomicLong(0)
+        private val unattributedSharedDnsQueries = AtomicLong(0)
+        private val lastDnsOwnerUid = AtomicLong(-1)
 
         private val trafficLock = Any()
         private val recentDrops = ArrayDeque<TrafficDrop>()
         private val recentDns = ArrayDeque<DnsActivity>()
         private val trackerBlockCounts = linkedMapOf<String, TrackerDomainStat>()
+        private val exactAttributedPackages = linkedSetOf<String>()
 
         fun isRunning(): Boolean = mode != Mode.OFF
         fun currentMode(): Mode = mode
@@ -127,6 +139,19 @@ class GuardianVpnService : VpnService() {
 
         /** Selection captured when the current VPN was established, not pending edits. */
         fun activeRulePackages(): Set<String> = activeRules.toSet()
+
+        /** Counters help distinguish a DNS-routing failure from an app-attribution failure. */
+        fun attributionSnapshot(): AttributionSnapshot = AttributionSnapshot(
+            capturedDnsQueries = dnsQueries.get(),
+            exactlyAttributedQueries = exactlyAttributedDnsQueries.get(),
+            unattributedSharedQueries = unattributedSharedDnsQueries.get(),
+            lastOwnerUid = lastDnsOwnerUid.get()
+        )
+
+        /** True only after this active VPN session has attributed at least one DNS query to the app. */
+        fun hasExactAttributionFor(packageName: String): Boolean = synchronized(trafficLock) {
+            packageName in exactAttributedPackages
+        }
 
         fun trafficSnapshot(): TrafficSnapshot {
             val snapshotData = synchronized(trafficLock) {
@@ -173,11 +198,15 @@ class GuardianVpnService : VpnService() {
             dnsRetryRecoveries.set(0)
             dnsAttemptTimeouts.set(0)
             dnsIgnoredResponses.set(0)
+            exactlyAttributedDnsQueries.set(0)
+            unattributedSharedDnsQueries.set(0)
+            lastDnsOwnerUid.set(-1)
             TrackerShieldDiagnostics.reset()
             synchronized(trafficLock) {
                 recentDrops.clear()
                 recentDns.clear()
                 trackerBlockCounts.clear()
+                exactAttributedPackages.clear()
             }
         }
 
@@ -323,6 +352,10 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startTrackerShield() {
+        // Tracker Shield protects every app the user selected. Exact Watch metadata
+        // must never narrow that saved set to one app: Android's VPN TUN does not
+        // expose a reliable per-packet app UID here, so a shared session is reported
+        // as shared rather than falsely assigning its DNS events to the watch target.
         val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
             .filterNot { it == packageName }
             .toSet()
@@ -593,7 +626,13 @@ class GuardianVpnService : VpnService() {
                     dnsQueries.incrementAndGet()
                     lastActivityAt.set(System.currentTimeMillis())
                     val classification = TrackerDomainClassifier.classify(request.domain)
-                    val sourcePackage = activeVpnPackages.singleOrNull()
+                    val sourcePackage = resolveDnsSourcePackage(request)
+                    if (sourcePackage != null) {
+                        exactlyAttributedDnsQueries.incrementAndGet()
+                        synchronized(trafficLock) { exactAttributedPackages.add(sourcePackage) }
+                    } else if (activeVpnPackages.size > 1) {
+                        unattributedSharedDnsQueries.incrementAndGet()
+                    }
                     val sourceLabel = sourcePackage?.let(::appLabel)
                         ?: "One of ${activeVpnPackages.size} shielded apps"
 
@@ -678,6 +717,48 @@ class GuardianVpnService : VpnService() {
             isDaemon = true
             start()
         }
+    }
+
+    /**
+     * Resolve the owner of a DNS UDP flow while it is inside Guardian's VPN.
+     * Android Q+ exposes this specifically for VPN connection attribution. If the
+     * owner cannot be resolved uniquely among selected apps, keep it unattributed;
+     * never assign a shared-session query to an arbitrary app.
+     */
+    private fun resolveDnsSourcePackage(request: DnsPacketCodec.Request): String? {
+        if (activeVpnPackages.size == 1) return activeVpnPackages.single()
+        if (activeVpnPackages.size < 2 || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
+
+        val ownerUid = runCatching {
+            val local = InetSocketAddress(
+                InetAddress.getByAddress(request.sourceAddress),
+                request.sourcePort
+            )
+            val remote = InetSocketAddress(
+                InetAddress.getByAddress(request.destinationAddress),
+                request.destinationPort
+            )
+            getSystemService(ConnectivityManager::class.java)
+                .getConnectionOwnerUid(OsConstants.IPPROTO_UDP, local, remote)
+        }.getOrNull()?.takeIf { it >= 0 } ?: return null
+
+        lastDnsOwnerUid.set(ownerUid.toLong())
+        // Prefer the package manager's UID mapping, then fall back to per-app
+        // ApplicationInfo. The second path covers OEM/package-manager edge cases
+        // where getPackagesForUid is incomplete; ambiguity remains unattributed.
+        val packagesForUid = runCatching {
+            packageManager.getPackagesForUid(ownerUid)?.toSet().orEmpty()
+        }.getOrDefault(emptySet())
+        val uidMatches = activeVpnPackages.filter { it in packagesForUid }
+        if (uidMatches.size == 1) return uidMatches.single()
+        if (uidMatches.size > 1) return null
+
+        val matchingPackages = activeVpnPackages.filter { selectedPackage ->
+            runCatching {
+                packageManager.getApplicationInfo(selectedPackage, 0).uid == ownerUid
+            }.getOrDefault(false)
+        }
+        return matchingPackages.singleOrNull()
     }
 
     private fun forwardDns(
