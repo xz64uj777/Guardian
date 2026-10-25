@@ -471,6 +471,37 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
     }
 
+    private fun restoreOrStartLiveWindow(packageName: String) {
+        val prefs = getSharedPreferences("guardian_live_watch_windows", MODE_PRIVATE)
+        if (prefs.getString("packageName", null) == packageName &&
+            prefs.getLong("baselineStartedAt", 0L) > 0L
+        ) {
+            baselineDecisions = prefs.getLong("baselineDecisions", 0L)
+            baselineBlocked = prefs.getLong("baselineBlocked", 0L)
+            baselineStartedAt = prefs.getLong("baselineStartedAt", 0L)
+            frozenAt = prefs.getLong("frozenAt", 0L)
+            frozenDecisions = prefs.getLong("frozenDecisions", 0L)
+            frozenBlocked = prefs.getLong("frozenBlocked", 0L)
+            frozenReportText = prefs.getString("frozenReportText", null)
+            return
+        }
+        resetLiveWindow(packageName)
+    }
+
+    private fun persistLiveWindow(packageName: String) {
+        getSharedPreferences("guardian_live_watch_windows", MODE_PRIVATE)
+            .edit()
+            .putString("packageName", packageName)
+            .putLong("baselineDecisions", baselineDecisions)
+            .putLong("baselineBlocked", baselineBlocked)
+            .putLong("baselineStartedAt", baselineStartedAt)
+            .putLong("frozenAt", frozenAt)
+            .putLong("frozenDecisions", frozenDecisions)
+            .putLong("frozenBlocked", frozenBlocked)
+            .putString("frozenReportText", frozenReportText)
+            .apply()
+    }
+
     private fun resetLiveWindow(packageName: String) {
         val profile = TrackerActivityStore.profile(this, packageName)
         baselineDecisions = profile?.cumulativeDecisions ?: 0L
@@ -480,6 +511,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenDecisions = 0L
         frozenBlocked = 0L
         frozenReportText = null
+        persistLiveWindow(packageName)
     }
 
     private fun freezeLiveWindow(app: FirewallApp) {
@@ -488,6 +520,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenDecisions = profile.cumulativeDecisions
         frozenBlocked = profile.blockedDecisions
         frozenReportText = buildLiveReport(app, profile)
+        persistLiveWindow(app.packageName)
 
         val decisions = (frozenDecisions - baselineDecisions).coerceAtLeast(0L)
         val blocked = (frozenBlocked - baselineBlocked).coerceAtLeast(0L)
@@ -622,7 +655,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 frozenReportText = null
             } else {
                 expandedPackageName = app.packageName
-                resetLiveWindow(app.packageName)
+                restoreOrStartLiveWindow(app.packageName)
             }
             renderApps()
             restartLiveRefresh()
