@@ -70,6 +70,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val startedAt: Long
     )
     private val watchBaselines = mutableMapOf<String, WatchBaseline>()
+    private val watchBaselinePrefs by lazy {
+        getSharedPreferences("guardian_watch_window_baselines", MODE_PRIVATE)
+    }
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
@@ -250,9 +253,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private fun isExactLive(packageName: String): Boolean {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
-        return packageName in active && (
-            active.size == 1 || GuardianVpnService.hasExactAttributionFor(packageName)
-        )
+        // Do not call a session EXACT LIVE merely because one app is selected.
+        // Wait until the VPN actually attributes at least one DNS flow to this app.
+        return packageName in active && GuardianVpnService.hasExactAttributionFor(packageName)
     }
 
     private fun isSharedShieldSession(packageName: String): Boolean {
@@ -403,19 +406,26 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
     private fun saveWatchBaseline(packageName: String) {
         if (baselineStartedAt <= 0L) return
-        watchBaselines[packageName] = WatchBaseline(
+        val baseline = WatchBaseline(
             decisions = baselineDecisions,
             blocked = baselineBlocked,
             startedAt = baselineStartedAt
         )
+        watchBaselines[packageName] = baseline
+        watchBaselinePrefs.edit()
+            .putLong("${packageName}_decisions", baseline.decisions)
+            .putLong("${packageName}_blocked", baseline.blocked)
+            .putLong("${packageName}_started", baseline.startedAt)
+            .apply()
     }
 
     private fun activateLiveWindow(packageName: String) {
-        val saved = watchBaselines[packageName]
+        val saved = watchBaselines[packageName] ?: readWatchBaseline(packageName)
         if (saved == null) {
             resetLiveWindow(packageName)
             return
         }
+        watchBaselines[packageName] = saved
         baselineDecisions = saved.decisions
         baselineBlocked = saved.blocked
         baselineStartedAt = saved.startedAt
@@ -423,6 +433,16 @@ class ProtectionAppsActivity : AppCompatActivity() {
         frozenDecisions = 0L
         frozenBlocked = 0L
         frozenReportText = null
+    }
+
+    private fun readWatchBaseline(packageName: String): WatchBaseline? {
+        val started = watchBaselinePrefs.getLong("${packageName}_started", 0L)
+        if (started <= 0L) return null
+        return WatchBaseline(
+            decisions = watchBaselinePrefs.getLong("${packageName}_decisions", 0L),
+            blocked = watchBaselinePrefs.getLong("${packageName}_blocked", 0L),
+            startedAt = started
+        )
     }
 
     private fun resetLiveWindow(packageName: String) {
@@ -718,7 +738,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val exactState = if (
             GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
             app.packageName in activeRules &&
-            (activeRules.size == 1 || GuardianVpnService.hasExactAttributionFor(app.packageName))
+            GuardianVpnService.hasExactAttributionFor(app.packageName)
         ) "EXACT LIVE" else "NOT EXACT LIVE"
 
         val recent = profile.recentDecisions
