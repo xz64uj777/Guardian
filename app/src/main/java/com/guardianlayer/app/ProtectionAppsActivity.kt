@@ -64,6 +64,15 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private var loading = true
     private var preferredMode: String = MODE_FIREWALL
     private var expandedPackageName: String? = null
+    private data class WatchBaseline(
+        val decisions: Long,
+        val blocked: Long,
+        val startedAt: Long
+    )
+    private val watchBaselines = mutableMapOf<String, WatchBaseline>()
+    private val watchBaselinePrefs by lazy {
+        getSharedPreferences("guardian_watch_window_baselines", MODE_PRIVATE)
+    }
     private var baselineDecisions = 0L
     private var baselineBlocked = 0L
     private var baselineStartedAt = 0L
@@ -221,7 +230,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 if (isFinishing || isDestroyed) return@runOnUiThread
                 loading = false
                 apps = result.getOrDefault(emptyList())
-                if (expandedPackageName != null && baselineStartedAt == 0L) resetLiveWindow(expandedPackageName!!)
+                if (expandedPackageName != null && baselineStartedAt == 0L) activateLiveWindow(expandedPackageName!!)
                 renderApps()
                 if (result.isFailure) {
                     list.removeAllViews()
@@ -244,20 +253,27 @@ class ProtectionAppsActivity : AppCompatActivity() {
     private fun isExactLive(packageName: String): Boolean {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
-        return active.size == 1 && packageName in active
+        // Do not call a session EXACT LIVE merely because one app is selected.
+        // Wait until the VPN actually attributes at least one DNS flow to this app.
+        return packageName in active && GuardianVpnService.hasExactAttributionFor(packageName)
     }
 
     private fun isSharedShieldSession(packageName: String): Boolean {
         if (GuardianVpnService.currentMode() != GuardianVpnService.Mode.TRACKER_SHIELD) return false
         val active = GuardianVpnService.activeRulePackages()
-        return active.size > 1 && packageName in active
+        return active.size > 1 && packageName in active &&
+            !GuardianVpnService.hasExactAttributionFor(packageName)
     }
 
     private fun requestExactWatch(packageName: String) {
+        // Preserve each app's test start when the user switches between apps.
+        // Otherwise every return to an app resets its baseline to the latest total,
+        // making the report say 0 DNS even though the app was active moments earlier.
+        expandedPackageName?.takeIf { it != packageName }?.let(::saveWatchBaseline)
         TrackerShieldRuleStore.beginExactWatch(this, packageName)
         FirewallRuleStore.setBlocked(this, packageName, false)
         expandedPackageName = packageName
-        resetLiveWindow(packageName)
+        activateLiveWindow(packageName)
 
         when (GuardianVpnService.currentMode()) {
             GuardianVpnService.Mode.TRACKER_SHIELD -> {
@@ -388,15 +404,54 @@ class ProtectionAppsActivity : AppCompatActivity() {
         }
     }
 
+    private fun saveWatchBaseline(packageName: String) {
+        if (baselineStartedAt <= 0L) return
+        val baseline = WatchBaseline(
+            decisions = baselineDecisions,
+            blocked = baselineBlocked,
+            startedAt = baselineStartedAt
+        )
+        watchBaselines[packageName] = baseline
+        watchBaselinePrefs.edit()
+            .putLong("${packageName}_decisions", baseline.decisions)
+            .putLong("${packageName}_blocked", baseline.blocked)
+            .putLong("${packageName}_started", baseline.startedAt)
+            .apply()
+    }
+
+    private fun activateLiveWindow(packageName: String) {
+        // Always start a fresh window that already includes the last 60 seconds
+        // of observed activity. Restoring an old long baseline made the live
+        // window look stale and disconnected from "Right now".
+        resetLiveWindow(packageName)
+    }
+
+    private fun readWatchBaseline(packageName: String): WatchBaseline? {
+        val started = watchBaselinePrefs.getLong("${packageName}_started", 0L)
+        if (started <= 0L) return null
+        return WatchBaseline(
+            decisions = watchBaselinePrefs.getLong("${packageName}_decisions", 0L),
+            blocked = watchBaselinePrefs.getLong("${packageName}_blocked", 0L),
+            startedAt = started
+        )
+    }
+
     private fun resetLiveWindow(packageName: String) {
         val profile = TrackerActivityStore.profile(this, packageName)
-        baselineDecisions = profile?.cumulativeDecisions ?: 0L
-        baselineBlocked = profile?.blockedDecisions ?: 0L
-        baselineStartedAt = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        // Include the last 60 seconds of already-observed activity so the
+        // live window matches what "Right now" is showing instead of starting empty.
+        val recent = TrackerActivityStore.recentWindow(this, packageName, now - 60_000L)
+        val cumulative = profile?.cumulativeDecisions ?: 0L
+        val cumulativeBlocked = profile?.blockedDecisions ?: 0L
+        baselineDecisions = (cumulative - recent.decisions).coerceAtLeast(0L)
+        baselineBlocked = (cumulativeBlocked - recent.blockedDecisions).coerceAtLeast(0L)
+        baselineStartedAt = now - 60_000L
         frozenAt = 0L
         frozenDecisions = 0L
         frozenBlocked = 0L
         frozenReportText = null
+        saveWatchBaseline(packageName)
     }
 
     private fun freezeLiveWindow(app: FirewallApp) {
@@ -538,8 +593,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
                 frozenBlocked = 0L
                 frozenReportText = null
             } else {
+                expandedPackageName?.takeIf { it != app.packageName }?.let(::saveWatchBaseline)
                 expandedPackageName = app.packageName
-                resetLiveWindow(app.packageName)
+                activateLiveWindow(app.packageName)
             }
             renderApps()
             restartLiveRefresh()
@@ -678,8 +734,8 @@ class ProtectionAppsActivity : AppCompatActivity() {
         val activeRules = GuardianVpnService.activeRulePackages()
         val exactState = if (
             GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD &&
-            activeRules.size == 1 &&
-            app.packageName in activeRules
+            app.packageName in activeRules &&
+            GuardianVpnService.hasExactAttributionFor(app.packageName)
         ) "EXACT LIVE" else "NOT EXACT LIVE"
 
         val recent = profile.recentDecisions
@@ -784,9 +840,9 @@ class ProtectionAppsActivity : AppCompatActivity() {
         panel.addView(text(if (liveMode) "APP ACTIVITY  •  LIVE" else "APP ACTIVITY", 12f, if (liveMode) green else violet, Typeface.BOLD))
         panel.addView(text(
             when {
-                liveMode -> "Updating every 2 seconds while this panel is open. The live test window keeps counting while you switch to the app and come back."
-                sharedShieldSession -> "Tracker Shield is protecting multiple apps. Guardian will not claim exact per-app live attribution in this shared session."
-                else -> "Live exact attribution requires Tracker Shield to be running with only this app in the active shield session."
+                liveMode -> "Updating every 2 seconds while this panel is open. In a multi-app session, exact status appears only after Android identifies this app as the DNS flow owner."
+                sharedShieldSession -> "Tracker Shield is protecting multiple apps. Guardian is checking Android's VPN flow-owner information; this app remains unattributed until that lookup succeeds."
+                else -> "Live exact attribution requires this app to be active in Tracker Shield. In multi-app sessions, Android must also identify the DNS flow owner."
             },
             11f,
             secondary,
@@ -795,7 +851,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
 
         if (profile == null || profile.cumulativeDecisions <= 0L) {
             panel.addView(text("No exact traffic history is available for ${app.label} yet. Guardian records per-app DNS history only when attribution is confident; an empty history does not mean the app made no network connections.", 13f, secondary, Typeface.NORMAL).top(dp(7)))
-            panel.addView(text("Try running Tracker Shield with this app selected, use the app normally, then keep this panel open.", 12f, primary, Typeface.BOLD).top(dp(8)))
+            panel.addView(text("Use the app normally while Tracker Shield runs. With multiple selected apps, Guardian will show exact activity only when Android's VPN flow-owner lookup identifies the app.", 12f, primary, Typeface.BOLD).top(dp(8)))
         } else {
             val number = NumberFormat.getIntegerInstance()
             val now = System.currentTimeMillis()
@@ -812,7 +868,7 @@ class ProtectionAppsActivity : AppCompatActivity() {
             }
             val rightNowState = when {
                 !liveMode && sharedShieldSession ->
-                    "NOT EXACT LIVE  •  This is a shared Tracker Shield session. Use one active shielded app for exact per-app RIGHT NOW activity."
+                    "NOT EXACT LIVE  •  Guardian has not yet attributed this app's DNS flow in the shared session. Its traffic is not guessed or mixed into another app's report."
                 !liveMode ->
                     "NOT LIVE  •  Exact per-app monitoring is not active for this app right now. Last exact activity ${age(profile.lastSeenAt)}."
                 rightNow.decisions == 0L ->
