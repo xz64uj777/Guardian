@@ -1,78 +1,97 @@
 # Guardian
 
-Guardian is a native Android privacy and security product built around one question:
+Guardian is a native Android family digital-protection app built around one goal:
 
-> What is my device doing right now, and should I care?
+> Bring family digital protection into one app.
 
-Guardian turns technical device and network behavior into plain-English explanations and gives the user meaningful controls rather than vague "all clear" messages.
+It aims to make device and app activity understandable, provide practical privacy controls, and report only what Guardian can support with evidence. Guardian is still under active development; this README distinguishes implemented foundations from features that still need validation.
 
-## First product pillars
+## Current development status
 
-- Device and app security analysis
-- Permission-risk explanations
-- Local VPN/firewall foundation
-- Real emergency **Lock Down** mode
-- Real per-app network blocking
-- Local behavior/event timeline
-- Privacy exposure scoring
-- Clear review states instead of unsupported malware certainty
+- **Current development build:** `0.7.6-alpha-debug`
+- **Debug application ID:** `com.guardianlayer.app.debug` (`com.guardianlayer.app` base ID)
+- **Version code:** `50`
+- **CI status:** Unit tests and debug APK assembly passed for the current per-app-watch development branch.
+- **Real-device status:** Installation and end-to-end behavior still require confirmation on a physical Android device. A successful CI build is not proof that the APK installs or that Chrome remains usable.
+- **Per-app-watch work branch:** `fix/per-app-watch-window-baselines`
+- **Related pull request:** [#6 — Preserve Guardian test windows when switching apps](https://github.com/xz64uj777/Guardian/pull/6)
 
-## Relationship to Vscan
+This README reflects the current development status; it does not claim that every feature is complete or production-ready. Check the linked pull request and [GitHub Actions](https://github.com/xz64uj777/Guardian/actions) for current review and CI status.
 
-Vscan remains a separate private scanner/security-engine project. Guardian does **not** expose or copy the private Vscan source tree. Shared security capabilities should move through a deliberately extracted module or documented interface.
+## Current capabilities and work areas
 
-## Android baseline
+### Tracker Shield and app activity
 
-- Kotlin 2.0.21
+Guardian includes a Tracker Shield / app-activity workflow intended to show DNS activity that can be confidently attributed to an app, along with blocked/allowed decisions and tracker-domain signals.
+
+The current development work addresses keeping a separate live-test baseline for each watched app when switching between apps such as Chrome (`com.android.chrome`) and Facebook (`com.facebook.katana`). Switching views should not silently replace one app's test window with another's.
+
+Reports distinguish:
+
+- **Right now / last 60 seconds** — recent activity in the current time window.
+- **Live test window / This watch** — activity counted for the selected test/watch window.
+- **Retained or recent exact history** — previously observed activity, not necessarily new traffic in the current watch.
+- **Shared or unattributed traffic** — traffic Guardian cannot confidently assign to one app.
+
+These categories are not interchangeable. Separate per-app windows do **not** by themselves prove perfect simultaneous app attribution. Chrome/Facebook switching, attribution accuracy, and browser usability still need real-device verification.
+
+### VPN and blocking foundations
+
+Guardian has a local VPN-based protection foundation and per-app protection controls. The exact behavior depends on the selected mode and current implementation; do not assume every menu item represents a complete production firewall. Full connection forwarding/inspection and robust tracker-domain filtering must not be claimed unless implemented and verified.
+
+### Security and privacy principles
+
+- Explain the evidence behind a signal instead of presenting a privacy signal as a malware verdict.
+- DNS/tracker observations are not, by themselves, proof that an app is malicious.
+- Local-first handling is the design goal for device activity and protection settings.
+- Users must retain a clear way to stop Guardian protection and restore normal network access.
+- Preserve existing installations and saved reports during testing; do not recommend uninstalling as routine troubleshooting when it could remove local data.
+
+## Known limitations and validation still required
+
+- The current per-app-watch changes passed automated unit tests and debug APK assembly, but still require installation and regression testing on a real phone.
+- Verify that a new debug APK updates the existing debug installation. If Android reports **“App not installed,”** do not uninstall the current app until saved data and package/signing compatibility have been checked.
+- Verify Chrome loads normally with Guardian enabled, including when tracker blocking is active. A build that makes Chrome slow or unable to load pages is a regression.
+- Verify Chrome and Facebook maintain independent watch windows when switching repeatedly between them.
+- Confirm reports clearly separate fresh traffic, retained history, and shared/unattributed DNS activity.
+- Confirm saved test results survive navigation and reopening the relevant screens.
+- Guardian is not a substitute for a full commercial antivirus engine and must not claim a device or app is malware-free based solely on its current signals.
+
+## Android development setup
+
+- Kotlin / Android Gradle project
 - Java 17
 - minSdk 26
-- target/compile SDK 36
-- AGP 8.10.1
+- compileSdk 36
+- targetSdk 36
 - Gradle 8.11.1
-- Application ID: `com.guardianlayer.app`
+- Android namespace/base application ID: `com.guardianlayer.app`
 
-## Current milestone: 0.2.0-alpha
-
-Guardian now has two real VPN protection modes:
-
-### Emergency Lock Down
-
-Lock Down routes device traffic into Guardian's local VPN and discards it. Guardian itself is excluded so the user can always return to the control app and stop protection.
-
-### Selective per-app firewall
-
-The user can mark visible launcher apps as **BLOCKED**. When the Smart Firewall is active, only those selected packages are attached to Guardian's VPN via Android `VpnService.Builder.addAllowedApplication(...)`. Their packets are discarded, while unselected apps remain on Android's normal network route.
-
-This provides genuine per-app internet blocking without pretending Guardian already has a full userspace TCP/UDP forwarder.
-
-Current 0.2 behavior:
-
-- Per-app BLOCK / ALLOW rules stored locally
-- Start / stop Smart Firewall independently of Lock Down
-- Rules can be changed while the firewall is running and are reapplied immediately
-- Foreground notification reports which protection mode is active
-- Guardian Timeline records rule changes and firewall state
-- Emergency Restore Network still stops any Guardian VPN mode
-- Stable debug signing allows future CI debug APKs to update the installed test build
-
-## What 0.2 does not claim yet
-
-Selective blocking is not the same thing as full connection monitoring. Guardian does not yet forward allowed traffic, inspect every connection, attribute destinations to apps, or perform tracker/domain filtering. Those require the next networking layer and will be added deliberately rather than mocked.
-
-## Privacy boundary
-
-Guardian is local-first. Security events, firewall rules, and privacy-snapshot results remain on-device. No analytics SDK or remote scan upload is included.
-
-## Build
-
-Android Studio can import the repository directly. CI uses Gradle 8.11.1 and uploads the debug APK as a workflow artifact.
+Build a debug APK locally with:
 
 ```bash
+./gradlew :app:testDebugUnitTest
 ./gradlew :app:assembleDebug
 ```
 
+The APK is produced at:
+
+```
+app/build/outputs/apk/debug/app-debug.apk
+```
+
+GitHub Actions runs unit tests, assembles the debug APK, and uploads it as a workflow artifact. Use the artifact from the specific successful run you intend to test; do not assume an older artifact contains current changes.
+
+Debug builds use a stable debug-only signing configuration intended to support updates across CI builds. This debug signing key is not for production releases.
+
+## Release and scope notes
+
+Guardian is an evolving family digital-protection product, not yet a finished production release. Parent/child phone integration and additional family features must not be represented as completed until implemented and tested.
+
+Vscan remains a separate private scanner/security-engine project. Guardian does not expose or copy the private Vscan source tree; shared capabilities should be integrated through a deliberately extracted module or documented interface.
+
 ## Product rule
 
-Guardian must not imply it can prove a device or app is malware-free. Risk scores are review signals and explanations, not verdicts.
+**Report what Guardian can substantiate.** A tracker signal is a privacy indicator, not a malware finding; a successful build is not a successful device test; and a feature is not complete until its real behavior has been validated.
 
 Copyright © 2026 Guardian. All rights reserved.
