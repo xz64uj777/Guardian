@@ -420,19 +420,10 @@ class ProtectionAppsActivity : AppCompatActivity() {
     }
 
     private fun activateLiveWindow(packageName: String) {
-        val saved = watchBaselines[packageName] ?: readWatchBaseline(packageName)
-        if (saved == null) {
-            resetLiveWindow(packageName)
-            return
-        }
-        watchBaselines[packageName] = saved
-        baselineDecisions = saved.decisions
-        baselineBlocked = saved.blocked
-        baselineStartedAt = saved.startedAt
-        frozenAt = 0L
-        frozenDecisions = 0L
-        frozenBlocked = 0L
-        frozenReportText = null
+        // Always start a fresh window that already includes the last 60 seconds
+        // of observed activity. Restoring an old long baseline made the live
+        // window look stale and disconnected from "Right now".
+        resetLiveWindow(packageName)
     }
 
     private fun readWatchBaseline(packageName: String): WatchBaseline? {
