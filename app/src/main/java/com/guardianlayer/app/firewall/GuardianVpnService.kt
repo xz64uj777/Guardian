@@ -331,28 +331,15 @@ class GuardianVpnService : VpnService() {
     }
 
     private fun startTrackerShield() {
-        // Tracker Shield protects every app the user selected. Exact Watch metadata
-        // must never narrow that saved set to one app: Android's VPN TUN does not
-        // expose a reliable per-packet app UID here, so a shared session is reported
-        // as shared rather than falsely assigning its DNS events to the watch target.
-        val protectedPackages = TrackerShieldRuleStore.protectedPackages(this)
+        // Tracker Shield is device-wide by default. The saved app selection remains
+        // available for app-specific UI/watch preferences, but must not limit which
+        // apps receive DNS filtering.
+        val selectedPackages = TrackerShieldRuleStore.protectedPackages(this)
             .filterNot { it == packageName }
             .toSet()
 
-        if (protectedPackages.isEmpty()) {
-            stopVpn(logEvent = false)
-            GuardianEventStore.append(
-                this,
-                "INFO",
-                "Tracker Shield idle",
-                "No apps are marked Shielded, so Guardian did not start Tracker Shield."
-            )
-            stopSelf()
-            return
-        }
-
         val upstream = resolveUpstreamDns()
-        rebuildTrackerShield(protectedPackages, upstream)
+        rebuildTrackerShield(selectedPackages, upstream)
     }
 
     @Synchronized
@@ -463,22 +450,24 @@ class GuardianVpnService : VpnService() {
 
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
-        val effectivePackages = mutableListOf<String>()
-        protectedPackages.forEach { protectedPackage ->
-            if (runCatching { builder.addAllowedApplication(protectedPackage) }.isSuccess) {
-                effectivePackages += protectedPackage
-            }
-        }
-
-        if (effectivePackages.isEmpty()) {
+        // No allow-list means the VPN applies to all apps. Exclude Guardian itself
+        // to prevent its own upstream DNS forwarding and app traffic from looping back.
+        if (runCatching { builder.addDisallowedApplication(packageName) }.isFailure) {
             failToStart(
                 "Tracker Shield could not start",
-                "Guardian could not attach any shielded apps to its DNS filtering VPN."
+                "Guardian could not exclude itself from its device-wide DNS filtering VPN."
             )
             return
         }
 
-        startForegroundCompat(Mode.TRACKER_SHIELD, effectivePackages.size)
+        val monitoredPackages = runCatching {
+            packageManager.getInstalledApplications(0)
+                .map { it.packageName }
+                .filterNot { it == packageName }
+                .distinct()
+        }.getOrDefault(emptyList())
+
+        startForegroundCompat(Mode.TRACKER_SHIELD, monitoredPackages.size)
         vpnInterface = runCatching { builder.establish() }.getOrNull()
         if (vpnInterface == null) {
             failToStart(
@@ -490,8 +479,8 @@ class GuardianVpnService : VpnService() {
 
         resetTrafficStats(Mode.TRACKER_SHIELD)
         synchronized(domainLogLock) { sessionLoggedDomains.clear() }
-        activeVpnPackages = effectivePackages.toList()
-        trafficSourcePrefix = trafficSourceLabel(Mode.TRACKER_SHIELD, effectivePackages)
+        activeVpnPackages = monitoredPackages
+        trafficSourcePrefix = "Device-wide monitored traffic"
         activeRules = protectedPackages.toSet()
         mode = Mode.TRACKER_SHIELD
         GuardianStateStore.setLockdownActive(this, false)
@@ -507,7 +496,7 @@ class GuardianVpnService : VpnService() {
             this,
             "INFO",
             "Tracker Shield activated",
-            "Guardian is filtering ordinary DNS for ${effectivePackages.size} selected app(s). Normal app traffic bypasses the VPN so the apps can stay online.$routingNote Encrypted DNS, cached destinations, and direct-IP traffic may bypass this DNS-only shield."
+            "Guardian is filtering ordinary DNS device-wide (excluding Guardian itself). Normal non-DNS traffic is explicitly excluded from the tunnel where Android supports split routing.$routingNote Encrypted DNS, cached destinations, and direct-IP traffic may bypass this DNS-only shield."
         )
 
         startTrackerDnsLoop(upstreamDns)
