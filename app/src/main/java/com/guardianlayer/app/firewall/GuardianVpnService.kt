@@ -450,22 +450,38 @@ class GuardianVpnService : VpnService() {
 
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(false)
 
-        // No allow-list means the VPN applies to all apps. Exclude Guardian itself
-        // to prevent its own upstream DNS forwarding and app traffic from looping back.
-        if (runCatching { builder.addDisallowedApplication(packageName) }.isFailure) {
-            failToStart(
-                "Tracker Shield could not start",
-                "Guardian could not exclude itself from its device-wide DNS filtering VPN."
-            )
-            return
-        }
+        // Exact Watch must use an Android VPN allow-list containing only its target.
+        // The previous device-wide configuration ignored the saved Exact Watch target,
+        // so UID ownership remained ambiguous and the app never became EXACT LIVE.
+        val exactWatchPackage = TrackerShieldRuleStore.exactWatchPackage(this)
+            ?.takeIf { it in protectedPackages }
 
-        val monitoredPackages = runCatching {
-            packageManager.getInstalledApplications(0)
-                .map { it.packageName }
-                .filterNot { it == packageName }
-                .distinct()
-        }.getOrDefault(emptyList())
+        val monitoredPackages = if (exactWatchPackage != null) {
+            if (runCatching { builder.addAllowedApplication(exactWatchPackage) }.isFailure) {
+                failToStart(
+                    "Exact Watch could not start",
+                    "Android could not attach the selected app to Guardian's exact-watch VPN."
+                )
+                return
+            }
+            listOf(exactWatchPackage)
+        } else {
+            // No allow-list means the VPN applies to all apps. Exclude Guardian itself
+            // to prevent its own upstream DNS forwarding and app traffic from looping back.
+            if (runCatching { builder.addDisallowedApplication(packageName) }.isFailure) {
+                failToStart(
+                    "Tracker Shield could not start",
+                    "Guardian could not exclude itself from its device-wide DNS filtering VPN."
+                )
+                return
+            }
+            runCatching {
+                packageManager.getInstalledApplications(0)
+                    .map { it.packageName }
+                    .filterNot { it == packageName }
+                    .distinct()
+            }.getOrDefault(emptyList())
+        }
 
         startForegroundCompat(Mode.TRACKER_SHIELD, monitoredPackages.size)
         vpnInterface = runCatching { builder.establish() }.getOrNull()
