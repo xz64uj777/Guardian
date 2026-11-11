@@ -119,6 +119,49 @@ class HomeDashboardActivity : AppCompatActivity() {
         }
         root.addView(hero(stateTitle, stateBody, stateColor).top(dp(22)))
 
+        val exactWatchPackage = TrackerShieldRuleStore.exactWatchPackage(this)
+        if (exactWatchPackage != null) {
+            val watchedAppName = runCatching {
+                val info = packageManager.getApplicationInfo(exactWatchPackage, 0)
+                packageManager.getApplicationLabel(info).toString()
+            }.getOrDefault(exactWatchPackage)
+            val exactWatchCard = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(16), dp(15), dp(16), dp(14))
+                background = rounded(raised, 18f, amber)
+                addView(text("EXACT WATCH ACTIVE", 12f, amber, Typeface.BOLD))
+                addView(text("Watching: $watchedAppName", 19f, primary, Typeface.BOLD).top(dp(5)))
+                addView(text(
+                    if (mode == GuardianVpnService.Mode.TRACKER_SHIELD)
+                        "Tracker Shield is limited to this app. Other apps are not included in this Exact Watch session."
+                    else
+                        "This app is saved as the Exact Watch target. When Tracker Shield starts, it will watch this app only.",
+                    12f, secondary, Typeface.NORMAL
+                ).top(dp(5)))
+                addView(MaterialButton(this@HomeDashboardActivity).apply {
+                    text = "RESTORE SAVED SHIELD SELECTION"
+                    textSize = 12f
+                    minHeight = dp(46)
+                    setOnClickListener {
+                        val restored = TrackerShieldRuleStore.restoreAfterExactWatch(this@HomeDashboardActivity)
+                        if (restored != null) {
+                            if (GuardianVpnService.currentMode() == GuardianVpnService.Mode.TRACKER_SHIELD) {
+                                startVpn(GuardianVpnService.ACTION_TRACKER_SHIELD)
+                            } else {
+                                Toast.makeText(
+                                    this@HomeDashboardActivity,
+                                    "Saved Tracker Shield selection restored: ${restored.size} app(s)",
+                                    Toast.LENGTH_SHORT
+                                ).show()
+                                render()
+                            }
+                        }
+                    }
+                }.top(dp(11)))
+            }
+            root.addView(exactWatchCard.top(dp(12)))
+        }
+
         if (pendingRules) {
             root.addView(actionCard(
                 "App changes waiting",
